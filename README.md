@@ -1,7 +1,7 @@
 # Antigravity Custom Model Enabler
 
-> ## 🆕 Antigravity IDE (VS Code Fork) 用户请看
-> 原版 `deploy.ps1` 仅适用于旧版 `app.asar` 布局。若你使用的是 **Antigravity IDE 独立版**（解包式 `resources\app`，VS Code Fork 架构），请使用：
+> ## Antigravity IDE (VS Code Fork) 部署方案
+> 本仓库针对 **Antigravity IDE 独立版**（解包式 `resources\app`，VS Code Fork 架构）适配部署：
 >
 > - 📖 **[DEPLOY_ANTIGRAVITY_IDE.md](./DEPLOY_ANTIGRAVITY_IDE.md)** — 完整适配指南（ESM 注入、`jetski.cloudCodeUrl`、Schema 要求、5 个已踩坑与修复）
 > - ⚙️ **`deploy-ide.ps1`** — 一键自动化部署脚本（含备份与回滚）
@@ -58,15 +58,13 @@ Antigravity IDE
 | [languageServer.ts](src/languageServer.ts) | Modified language server manager, starts proxy on app launch |
 
 #### Deployment Scripts
-| File | Platform |
+| File | Role |
 |---|---|
-| [deploy.ps1](deploy.ps1) | Windows — stops Antigravity, packs `dist/` into `app.asar`, restarts |
-| [deploy.sh](deploy.sh) | macOS — extracts `app.asar` from `/Applications/`, replaces `dist/`, repacks and relaunches |
-| [deploy_linux.sh](deploy_linux.sh) | Linux — auto-detects installation path across standard Electron app directories |
-| [repack.ps1](repack.ps1) | Repacks existing `app.asar` with updated `dist/` files |
+| [deploy-ide.ps1](deploy-ide.ps1) | Antigravity IDE (VS Code Fork) — one-click deploy: build, backup, inject ESM bootstrap, set `jetski.cloudCodeUrl`, (optional) LS patch |
+| [DEPLOY_ANTIGRAVITY_IDE.md](DEPLOY_ANTIGRAVITY_IDE.md) | Full IDE adaptation guide: architecture, 4 key differences, 5 known pitfalls, verification checklist, rollback |
 
 > [!NOTE]
-> The codebase was migrated from JavaScript (`dist/`) to **TypeScript** (`src/`) in v2.0.3. All source code lives under `src/` and compiles to `dist/` via `npx tsc`. The compiled `dist/` files are what get packed into `app.asar`.
+> The codebase was migrated from JavaScript (`dist/`) to **TypeScript** (`src/`) in v2.0.3. All source code lives under `src/` and compiles to `dist/` via `npx tsc`. For the IDE solution, `deploy-ide.ps1` copies the required runtime files into `resources\app\out\proxy\` (unpacked layout, no `app.asar`).
 
 ### Cloud Code API Reverse Engineering
 
@@ -247,8 +245,8 @@ antigravity-add-model/
 │   ├── __mocks__/                 # Test mocks
 ├── dist/                          # Compiled JavaScript output
 ├── tsconfig.json                  # TypeScript configuration
-├── deploy.ps1                     # Portable PowerShell deploy script
-├── repack.ps1                     # ASAR repack script
+├── deploy-ide.ps1                 # Antigravity IDE one-click deploy script
+├── DEPLOY_ANTIGRAVITY_IDE.md      # IDE adaptation guide
 ├── package.json                   # Electron app manifest
 └── README.md
 ```
@@ -292,51 +290,23 @@ You can configure **multiple models from different providers simultaneously**. A
 
 ## Installation
 
-### One-Click Re-Deploy (After Antigravity Updates)
-
-When Google releases a new Antigravity version, the update replaces the Language Server binary and custom models stop working. Simply run:
-
-```
-repatch.bat
-```
-
-Or double-click `repatch.bat` in the project folder. This rebuilds, redeploys the patch, and restarts Antigravity in one step.
-
-> [!IMPORTANT]
-> Run `repatch.bat` after **every** Antigravity auto-update to restore custom model support.
-
-### Automatic (Windows)
+### One-Click Deploy (Antigravity IDE)
 
 ```powershell
-.\deploy.ps1
+.\deploy-ide.ps1 -IdePath "C:\Users\<User>\AppData\Local\Programs\Antigravity IDE"
 ```
 
-This stops Antigravity, packs the project's `dist/` into `app.asar`, deploys to `%LOCALAPPDATA%\Programs\antigravity\resources\`, and restarts the app.
+The script automatically:
+1. Builds TypeScript → `dist/` (`npm run build`)
+2. Backs up `main.js`, `workbench.desktop.main.js`, and the Language Server binary to `resources\app_backup\` (includes one-click `rollback.ps1`)
+3. Deploys proxy runtime files to `resources\app\out\proxy\` and installs `electron-log`
+4. Injects an ESM dynamic `import('./proxy/bootstrap.js')` at the top of `out\main.js`
+5. Writes `jetski.cloudCodeUrl` → local proxy URL (idempotent)
+6. (Optional) Patches the Language Server binary — skip with `-SkipBinaryPatch` (non-essential in this architecture)
+7. Launches the IDE
 
 > [!TIP]
-> The deploy script uses `$PSScriptRoot` (script's own directory). You can run it from anywhere; it always finds the project.
-
-### Automatic (macOS)
-
-```bash
-bash deploy.sh
-```
-
-This kills any running Antigravity process, extracts the current `app.asar` from `/Applications/Antigravity.app/Contents/Resources/`, replaces its `dist/` with the latest build, re-packages, and relaunches the app.
-
-> [!TIP]
-> Make the script executable first: `chmod +x deploy.sh`. Like the Windows version, it auto-detects the project directory via `$SCRIPT_DIR`.
-
-### Automatic (Linux)
-
-```bash
-bash deploy_linux.sh
-```
-
-Stops any running Antigravity process, auto-detects the `app.asar` location (common search paths: `~/.local/share/Programs/`, `/opt/`, `/usr/lib/`), replaces its `dist/` with the latest build, re-packages, and relaunches the app.
-
-> [!TIP]
-> Make the script executable first: `chmod +x deploy_linux.sh`. It automatically searches for the Antigravity installation across multiple standard Linux Electron app paths.
+> The IDE uses an unpacked `resources\app\` layout (no `app.asar`). The Language Server's cloud endpoint is driven by the **`jetski.cloudCodeUrl`** user setting, which overrides the hardcoded URL — so writing it is the critical step. See [DEPLOY_ANTIGRAVITY_IDE.md](DEPLOY_ANTIGRAVITY_IDE.md) for the full guide, architecture, and 5 known pitfalls.
 
 ### Build from Source (TypeScript)
 
@@ -345,114 +315,37 @@ npm install
 npx tsc
 ```
 
-### Manual (All Platforms)
-
-```bash
-npx -y @electron/asar pack . "<antigravity_resources_dir>/app.asar"
-```
-
-- **Windows**: `C:\Users\<User>\AppData\Local\Programs\antigravity\resources\`
-- **macOS**: `/Applications/Antigravity.app/Contents/Resources/`
-
 ---
 
 ## Antigravity Update Recovery
 
 ### The Problem
 
-Starting with **Antigravity v2.0.6**, Google hardcoded the `fetchAvailableModels` API URL to `https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels` inside the Language Server binary. This call **bypasses the local proxy entirely**, meaning:
+Starting with **Antigravity v2.0.6**, the Language Server's `fetchAvailableModels` call targets `https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels`. Without interception, custom models would not appear in the chat dropdown — only Google's built-in Gemini models.
 
-- Custom models remain in `custom_models.json` and appear in **Settings → Custom Models**
-- But they **do NOT appear** in the chat model dropdown
-- The chat dropdown only shows Google's built-in Gemini models
+### The Fix (IDE Architecture)
 
-### The Fix: Binary Patch
+In the **Antigravity IDE (VS Code Fork)** architecture, the Language Server reads its cloud endpoint from the user setting **`jetski.cloudCodeUrl`** and passes it via `--cloud_code_endpoint`. This **overrides** the hardcoded URL inside the binary, so a binary patch is **non-essential** here. `deploy-ide.ps1` writes:
 
-The `deploy.ps1` / `deploy.sh` / `deploy_linux.sh` scripts **automatically apply a binary patch** to the Language Server executable. The hardcoded URL:
-
-```
-https://daily-cloudcode-pa.googleapis.com
+```json
+"jetski.cloudCodeUrl": "http://127.0.0.1:50999/v1internal/xxxxxxx"
 ```
 
-is replaced with:
+Routing all Cloud Code traffic through the local proxy is safe — unintercepted requests pass through to the official endpoint. The `/v1internal/xxxxxxx` padding is stripped by the proxy before forwarding to Google.
 
-```
-http://localhost:50999/v1internal/xxxxxxx
-```
+### After EVERY IDE Update
 
-This forces the Language Server to route **all** `fetchAvailableModels` calls through the local proxy, where custom models are injected before the response reaches the Antigravity frontend.
-
-### After EVERY Antigravity Update
-
-When Google releases a new Antigravity version (e.g., v2.0.7, v2.1.0):
-
-1. **Antigravity auto-updates** → The Language Server binary is replaced with an unpatched version
-2. **Custom models disappear** from the chat dropdown again
-3. **Re-run the deploy script** to re-apply the binary patch:
+Antigravity IDE auto-updates overwrite the injected files (`out\main.js`, `out\proxy\`, optionally the LS binary). Re-run the deploy script to restore everything:
 
 ```powershell
-# Windows (PowerShell)
-npm run build
-powershell -ExecutionPolicy Bypass -File ".\deploy.ps1"
-```
-
-```bash
-# macOS / Linux
-npm run build
-bash deploy.sh        # macOS
-bash deploy_linux.sh  # Linux
+.\deploy-ide.ps1 -IdePath "C:\Users\<User>\AppData\Local\Programs\Antigravity IDE"
 ```
 
 > [!IMPORTANT]
-> **You must redeploy after every Antigravity update.** The update replaces `language_server.exe` with a clean version, removing the binary patch. Running `deploy.ps1` re-applies the patch automatically.
-
-### How to Check if the Patch is Active
-
-Check the Language Server log after startup:
-
-```
-# Windows
-%APPDATA%\Antigravity\logs\language_server.log
-```
-
-If the patch is active, you'll see:
-```
-URL: http://localhost:50999/v1internal/xxxxxxx/v1internal:fetchAvailableModels
-```
-
-If the patch is NOT active (after an update), you'll see:
-```
-URL: https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels
-```
-
-### Technical Details
-
-The binary patch works by:
-
-1. **Finding** the string `https://daily-cloudcode-pa.googleapis.com` (41 bytes) in the LS binary
-2. **Replacing** it with `http://localhost:50999/v1internal/xxxxxxx` (exactly 41 bytes)
-3. **URL cleanup**: The proxy strips the `/v1internal/xxxxxxx` padding from incoming requests before forwarding to Google
-
-The patch also affects other hardcoded Cloud Code calls (`listExperiments`, `streamGenerateContent`, `loadCodeAssist`), routing them all through the proxy for consistent behavior.
-
-### Manual Binary Patch (if deploy script fails)
-
-```powershell
-# Find the offset of the hardcoded URL
-$offset = (Select-String -Path "language_server.exe" -Pattern "daily-cloudcode-pa.googleapis.com" -Encoding byte).Matches[0].Index - 8
-
-# Apply the patch
-$newUrl = [System.Text.Encoding]::ASCII.GetBytes("http://localhost:50999/v1internal/xxxxxxx")
-$fs = [System.IO.File]::OpenWrite("language_server.exe")
-$fs.Seek($offset, [System.IO.SeekOrigin]::Begin)
-$fs.Write($newUrl, 0, $newUrl.Length)
-$fs.Close()
-```
+> `settings.json` (`jetski.cloudCodeUrl`) and `custom_models.json` survive updates untouched, so only the file injection needs redoing.
 
 > [!NOTE]
-> The script above finds the `https://` prefix (8 bytes before the hostname) and replaces the full 41-byte URL. The `xxxxxxx` padding ensures the replacement stays exactly the same length as the original string.
->
-> A backup of the original binary is automatically created at `language_server.exe.bak` before patching.
+> For the full recovery flow, log locations, and verification checklist, see [DEPLOY_ANTIGRAVITY_IDE.md](DEPLOY_ANTIGRAVITY_IDE.md).
 
 ---
 
@@ -696,7 +589,6 @@ Set `DEBUG=antigravity:*` for verbose logging (debug level captures stream parse
 - **Security**: Added timeouts to all Google proxy requests (30-60s)
 - **Error handling**: Added debug logging to 6 previously-silent catch blocks
 - **Error handling**: Proper error propagation in streaming response handlers
-- **Fixed**: `deploy.ps1` now uses `$PSScriptRoot` (portable, no hardcoded paths)
 - **Documentation**: Updated README with TypeScript architecture, security defaults, troubleshooting
 - **Package**: Added `Apache-2.0` license field to `package.json`
 
@@ -707,7 +599,6 @@ Set `DEBUG=antigravity:*` for verbose logging (debug level captures stream parse
 - **Security**: Added 10MB request body size limit
 - **Security**: Added 120s configurable API request timeout
 - **Error handling**: Added error handlers for streaming and non-streaming API responses
-- **Fixed**: `deploy.ps1` hardcoded path to now uses `$PSScriptRoot`
 - **Documentation**: Added Security Considerations, Troubleshooting, and Developer Guide
 
 ### v2.0.2 (2026-05-24)
