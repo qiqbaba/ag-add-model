@@ -1,7 +1,6 @@
 # Antigravity IDE 部署 antigravity-add-model 完整指南
 
-> 针对 **Antigravity IDE 独立版**（VS Code Fork，解包式 `resources\app` 布局）的适配部署方案。
-> 原仓库的 `deploy.ps1` 仅支持旧版单一 `app.asar` 路径，本方案使其在 IDE 独立版上完整可用。
+> 针对 **Antigravity IDE 独立版**（VS Code Fork，解包式 `resources\app` 布局）的一键部署方案。
 
 ## 一、背景与架构
 
@@ -25,12 +24,11 @@ Antigravity IDE（VS Code Fork）的 AI 链路：
                         daily-cloudcode-pa.googleapis.com
 ```
 
-自定义模型配置：`~/.gemini/antigravity/custom_models.json`（首次加载后自动加密迁移）。
+自定义模型配置：`~/.gemini/antigravity/custom_models.json`（首次加载后自动加密）。
 
-## 二、与原版部署方案的 4 个关键差异
+## 二、IDE 架构关键点
 
-原 `deploy.ps1` 假设旧版 Antigravity（`app.asar` + CJS 主进程 + 二进制硬编码 URL）。
-IDE 独立版完全不同：
+Antigravity IDE 独立版的架构要点：
 
 ### 1. 解包目录，无 app.asar
 程序位于 `resources\app\out\`（`main.js`、`vs\workbench\workbench.desktop.main.js` 均为明文），无需 asar 解包/重打包，直接注入文件即可。
@@ -149,7 +147,7 @@ Node 的 `https.request` 会直连真实 IP 导致超时（fake-IP DNS 也不再
 
 ## 五、渲染层注入说明（可选，默认不做）
 
-原方案的 preload UI 注入（Settings 面板 / Add Model 弹窗）依赖旧版的 `window.antigravityAPI`。
+渲染层 preload UI 注入（Settings 面板 / Add Model 弹窗）依赖 `window.antigravityAPI` 接口。
 在 VS Code Fork 架构下，服务端注入（代理改写 `fetchAvailableModels`）已足够让自定义模型出现在
 下拉菜单中，因此**默认不修改 `workbench.desktop.main.js`**——实测全局 XHR/fetch hook 反而有破坏
 渲染层响应处理的风险。若需自定义 API Key 管理 UI，建议通过编辑 `custom_models.json` 完成。
@@ -181,7 +179,7 @@ Node 的 `https.request` 会直连真实 IP 导致超时（fake-IP DNS 也不再
 C:\Users\21855\AppData\Local\Programs\Antigravity IDE\resources\app_backup\rollback.ps1
 ```
 
-恢复 `main.js`、`workbench.desktop.main.js`、LS exe 原版文件并移除 `out\proxy`。
+恢复 `main.js`、`workbench.desktop.main.js`、LS exe 的原始文件并移除 `out\proxy`。
 `jetski.cloudCodeUrl` 设置需手动删除（或改回空）。
 
 ## 九、已知限制
@@ -192,5 +190,4 @@ C:\Users\21855\AppData\Local\Programs\Antigravity IDE\resources\app_backup\rollb
 
 ---
 
-*基于 [vahapogut/antigravity-add-model](https://github.com/vahapogut/antigravity-add-model) v2.0.1，
-针对 Antigravity IDE 1.107.0（Windows x64）实测适配，2026-08-26。*
+*针对 Antigravity IDE 1.107.0（Windows x64）实测，2026-08-26。*
