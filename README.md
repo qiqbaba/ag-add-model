@@ -1,7 +1,7 @@
 # Antigravity Custom Model Enabler
 
 > ## Antigravity IDE (VS Code Fork) 部署方案
-> 本仓库针对 **Antigravity IDE 独立版**（解包式 `resources\app`，VS Code Fork 架构）适配部署：
+> 本仓库为 **Antigravity IDE 独立版**（解包式 `resources\app`，VS Code Fork 架构）提供一键部署：
 >
 > - 📖 **[DEPLOY_ANTIGRAVITY_IDE.md](./DEPLOY_ANTIGRAVITY_IDE.md)** — 完整适配指南（ESM 注入、`jetski.cloudCodeUrl`、Schema 要求、5 个已踩坑与修复）
 > - ⚙️ **`deploy-ide.ps1`** — 一键自动化部署脚本（含备份与回滚）
@@ -61,10 +61,10 @@ Antigravity IDE
 | File | Role |
 |---|---|
 | [deploy-ide.ps1](deploy-ide.ps1) | Antigravity IDE (VS Code Fork) — one-click deploy: build, backup, inject ESM bootstrap, set `jetski.cloudCodeUrl`, (optional) LS patch |
-| [DEPLOY_ANTIGRAVITY_IDE.md](DEPLOY_ANTIGRAVITY_IDE.md) | Full IDE adaptation guide: architecture, 4 key differences, 5 known pitfalls, verification checklist, rollback |
+| [DEPLOY_ANTIGRAVITY_IDE.md](DEPLOY_ANTIGRAVITY_IDE.md) | Full IDE deploy guide: architecture, key technical points, known pitfalls, verification checklist, rollback |
 
 > [!NOTE]
-> The codebase was migrated from JavaScript (`dist/`) to **TypeScript** (`src/`) in v2.0.3. All source code lives under `src/` and compiles to `dist/` via `npx tsc`. For the IDE solution, `deploy-ide.ps1` copies the required runtime files into `resources\app\out\proxy\` (unpacked layout, no `app.asar`).
+> All source code lives under `src/` (TypeScript) and compiles to `dist/` via `npx tsc`. The `deploy-ide.ps1` script copies the required runtime files into `resources\app\out\proxy\` (unpacked layout, no `app.asar`).
 
 ### Cloud Code API Reverse Engineering
 
@@ -132,7 +132,7 @@ Claude models (`anthropic` provider) return tool calls as `tool_use` content blo
 All API keys are encrypted at rest using **AES-256-GCM** via Electron's `safeStorage`. The `cryptoStore.ts` module provides:
 
 - **Transparent encryption/decryption**: Keys are encrypted before writing to disk, decrypted on-the-fly when loaded into memory.
-- **Auto-migration**: On first run after the encryption update, any legacy plaintext `custom_models.json` config is automatically detected, encrypted, and rewritten.
+- **Auto-migration**: Any plaintext `custom_models.json` config is automatically detected, encrypted, and rewritten on first run.
 - **Masked display**: API keys in the UI are shown as `sk-...XXXX` (last 4 chars only) to prevent shoulder-surfing.
 - **OS-level key storage**: On macOS, `safeStorage` uses the Keychain; on Windows, it uses DPAPI.
 
@@ -154,7 +154,7 @@ If the default port `50999` is already in use (e.g., by another instance or stal
 
 ### Parallel Request Isolation
 
-Multiple models can now make simultaneous requests without cross-contamination. Previously, global variables like `lastToolCallIds` and `lastReasoningContent` could be overwritten by concurrent requests from different models. These have been migrated to **per-model `Map` structures**:
+Multiple models can make simultaneous requests without cross-contamination. State is scoped to **per-model `Map` structures** rather than shared globals:
 
 - `modelToolCallIds` (`Map<modelName, { fnName: toolCallId }>`) keeps tool call ID tracking scoped per model
 - `modelReasoningContent` (`Map<modelName, string>`) keeps DeepSeek reasoning state scoped per model
@@ -563,52 +563,6 @@ $env:HEADLESS="1"; .\Antigravity.exe
 ```
 
 Set `DEBUG=antigravity:*` for verbose logging (debug level captures stream parse fallbacks and wire-level details).
-
----
-
-## Changelog
-
-### v2.1.0
-- **TypeScript**: Full migration — all 23 source files converted from JavaScript to TypeScript (`dist/*.js` → `src/*.ts`)
-- **New Provider**: OpenRouter support (300+ models via unified API, OpenAI-compatible format)
-- **OpenRouter UI**: Provider dropdown, auto-filled URL, connection test, icon & color in Settings modal
-- **Dev Experience**: ESLint + Prettier configured with automated `lint`, `format`, `lint:fix` scripts
-- **Test Coverage**: Expanded to 137 tests across 6 test files (registry, proxy, modelUtils, translators)
-- **Cleanup**: Removed 25+ scratch development artifacts, added `.prettierignore`
-- **Architecture**: `ideInstall/` wizard extracted to dedicated TypeScript module
-
-### v2.0.3
-- **Architecture**: Extracted Google AI Studio translator to dedicated module
-- **Architecture**: Managed proxy state cleanup with proper interval lifecycle
-- **New**: Model connectivity test in Settings (green/red status indicator)
-- **New**: Automatic request retry with exponential backoff (429/5xx)
-- **New**: Configurable `maxRetries` per model
-- **Security**: Removed automatic SSL bypass for custom providers
-- **Security**: Added 10MB request body size limit (413 on overflow)
-- **Security**: Masked CSRF token in console output
-- **Security**: Added timeouts to all Google proxy requests (30-60s)
-- **Error handling**: Added debug logging to 6 previously-silent catch blocks
-- **Error handling**: Proper error propagation in streaming response handlers
-- **Documentation**: Updated README with TypeScript architecture, security defaults, troubleshooting
-- **Package**: Added `Apache-2.0` license field to `package.json`
-
-### v2.0.2
-- **Security**: Replaced `eval()` with safe `repairPartialJson()` (code injection fix)
-- **Security**: SSL bypass now only when `allowUnauthorized: true` (not all custom providers)
-- **Security**: Removed diagnostic `api_response_raw.json` disk writes
-- **Security**: Added 10MB request body size limit
-- **Security**: Added 120s configurable API request timeout
-- **Error handling**: Added error handlers for streaming and non-streaming API responses
-- **Documentation**: Added Security Considerations, Troubleshooting, and Developer Guide
-
-### v2.0.2 (2026-05-24)
-- **Critical fix**: Antigravity v2.0.6 update hardcoded `fetchAvailableModels` URL to `daily-cloudcode-pa.googleapis.com`, bypassing the local proxy. Custom models disappeared from the chat dropdown.
-- **Binary patch**: The Language Server binary is now automatically patched at build time to replace the hardcoded Google URL with the local proxy URL.
-- **URL padding handler**: Added regex-based URL cleanup in the proxy to strip binary patch padding.
-- **Model API fallbacks**: Added `GetAvailableModels` redirect, preload network interceptors, and forced page reload for robust model loading across Antigravity versions.
-
-### v2.0.0
-- Initial release: multi-provider proxy, API key encryption, streaming, tool calls, custom UI
 
 ---
 
