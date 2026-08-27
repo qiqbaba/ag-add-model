@@ -1,262 +1,48 @@
 # Antigravity 自定义模型启用器
 
-> ## Antigravity IDE（VS Code Fork）部署方案
-> 本仓库为 **Antigravity IDE 独立版**（解包式 `resources\app`，VS Code Fork 架构）提供一键部署：
+> **Antigravity IDE（VS Code Fork）部署方案**
 >
-> - 📖 **[DEPLOY_ANTIGRAVITY_IDE.md](./DEPLOY_ANTIGRAVITY_IDE.md)** — 完整部署指南（ESM 注入、`jetski.cloudCodeUrl`、Schema 要求、5 个已踩坑与修复）
-> - ⚙️ **`deploy-ide.ps1`** — 一键自动化部署脚本（含备份与回滚）
+> 本仓库为 **Antigravity IDE 独立版**（解包式 `resources\app`，VS Code Fork 架构）提供一键部署，可在内置 Gemini 模型之外启用外部 AI 模型（OpenAI、Anthropic、Together API、Ollama、Google AI Studio 以及任何 OpenAI 兼容的提供商）。
 >
-> ```powershell
-> .\deploy-ide.ps1 -IdePath "C:\Users\21855\AppData\Local\Programs\Antigravity IDE"
-> ```
+> 它向 Electron 应用注入一个本地 HTTP 代理，逆向工程 Cloud Code 内部 API（`v1internal`），在各提供商格式之间翻译请求/响应，并通过 `custom_models.json` 配置实现外部模型无缝接入。
 
-本仓库包含一个针对 **Google Antigravity** 的补丁，可在内置 Gemini 模型之外启用外部 AI 模型（OpenAI、Anthropic、Together API、Ollama、Google AI Studio 以及任何 OpenAI 兼容的提供商）。它向 Electron 应用注入一个本地 HTTP 代理，逆向工程 Cloud Code 内部 API（`v1internal`），在各提供商格式之间翻译请求/响应，并在设置页提供内联的“添加模型”UI。
+## 文档导航
 
-## 工作原理
+| 文档 | 适用对象 | 内容 |
+|---|---|---|
+| **本 README** | 使用者 | 安装、配置、参数说明、安全机制、常见故障排查 |
+| [ARCHITECTURE.md](./ARCHITECTURE.md) | 维护者 / 部署者 | **全景技术指南**：系统架构设计、内部 API 逆向规范、自动化部署、**9 个已踩坑与修复**、验证清单与回滚 |
 
-### 架构
+---
 
-```
-Antigravity IDE
-  └── Language Server（Go 二进制）
-        └── --api_server_url → http://127.0.0.1:50999（本地代理）
-                                   ├── Google 模型 → daily-cloudcode-pa.googleapis.com
-                                   └── 自定义模型 → 外部 API（Together、OpenAI 等）
-```
+## 快速开始
 
-### 关键组件
+### 一键部署（Antigravity IDE）
 
-#### 代理核心与入口
-| 文件 | 作用 |
-|---|---|
-| [index.ts](src/index.ts) | 统一模块入口：导出代理服务生命周期函数、校验器、加解密工具与翻译器注册表 |
-| [proxy.ts](src/proxy.ts) | 本地 HTTP 代理：拦截 Cloud Code API、注入自定义模型、翻译提供商协议、包装 SSE 流式响应 |
-| [registry.ts](src/proxy/registry.ts) | 自动发现式翻译器注册表，动态加载 `openai`、`anthropic`、`google`、`ollama` 翻译器 |
-| [shared.ts](src/proxy/shared.ts) | 跨轮次状态管理，带自动 TTL 定期清理 |
-| [modelUtils.ts](src/proxy/modelUtils.ts) | 集中式模型能力检测（thinking、DeepSeek、Claude、Vision 等） |
-
-#### 格式翻译器
-| 文件 | 作用 |
-|---|---|
-| [openai.ts](src/proxy/translators/openai.ts) | OpenAI ↔ Gemini 格式翻译（请求、响应、流式分块、工具调用） |
-| [anthropic.ts](src/proxy/translators/anthropic.ts) | Anthropic ↔ Gemini 格式翻译（Claude tool_use、SSE 流式、thinking 支持） |
-| [google.ts](src/proxy/translators/google.ts) | Google AI Studio 透传，带流式端点路由 |
-| [ollama.ts](src/proxy/translators/ollama.ts) | Ollama ↔ Gemini 格式翻译（OpenAI 兼容的本地 LLM） |
-| [utils.ts](src/proxy/translators/utils.ts) | 翻译器共享工具（工具调用映射、DSML 解析、参数类型修正） |
-
-#### 安全与数据
-| 文件 | 作用 |
-|---|---|
-| [cryptoStore.ts](src/cryptoStore.ts) | 通过 Electron `safeStorage` 进行 AES-256-GCM API 密钥加密 |
-| [schemaValidator.ts](src/schemaValidator.ts) | 对 API 响应、自定义模型、流式分块进行运行时 Schema 校验 |
-
-#### 部署脚本
-| 文件 | 作用 |
-|---|---|
-| [deploy-ide.ps1](deploy-ide.ps1) | Antigravity IDE（VS Code Fork）— 一键部署：构建、备份、注入 ESM bootstrap、写入 `jetski.cloudCodeUrl`、（可选）LS 补丁 |
-| [DEPLOY_ANTIGRAVITY_IDE.md](DEPLOY_ANTIGRAVITY_IDE.md) | 完整 IDE 部署指南：架构、关键技术点、已知坑、验证清单、回滚 |
-
-> [!NOTE]
-> 所有源码位于 `src/`（TypeScript），通过 `npx tsc` 编译到 `dist/`。`deploy-ide.ps1` 脚本将所需运行时文件复制到 `resources\app\out\proxy\`（解包式布局，无 `app.asar`）。
-
-### Cloud Code API 逆向工程
-
-Antigravity 使用 Google 的 **Cloud Code 内部 API**（`v1internal:*` 端点）而非公开 Gemini API。代理处理以下差异：
-
-1. **fetchAvailableModels**：拦截并注入自定义模型定义。响应中 `models` 是对象映射（key 为模型 id），
-   `agentModelSorts` 定义模型分组。自定义模型必须同时：
-   - 加入 `models` 映射（key = `extm-*` slug，`toSlug` 会清洗 `flash/pro/low/medium/high/tier/lite` 关键字，
-     其中 `flash`→`flsh`→`fx`、`lite`→`lt`，显示名称则由 `sanitizeDisplayName()` 同步清洗）；
-   - **加入 `agentModelSorts[0].groups[0].modelIds`**（前端只渲染该第一个分组的模型，额外分组会被忽略）；
-   - 补全官方条目字段（`thinkingBudget`、`minThinkingBudget`、`quotaInfo`、`name`），否则前端分级分组会崩溃。
-   自定义模型省略配额信息，因为它们使用用户自己的 API 密钥。
-   > **2026-08-27 修复**：若只补基础字段，官方 Low/Medium/High 子菜单仍会被遮挡（只露一条边缘）。根因是自定义模型
-   > 字段不完整导致前端 NaN 崩溃。补齐 `tagTitle`、`tagDescription`、`modelExperiments`、`thinkingLevel` 等**全部
-   > protobuf 字段**后，子菜单在自定义模型出现时也能正常展开。详见
-   > [DEPLOY_ANTIGRAVITY_IDE.md](./DEPLOY_ANTIGRAVITY_IDE.md) 坑 7。
-   > ⚠️ 注意：`thinkingLevel` 是 **int32 枚举**，必须传数字 `0`（`THINKING_LEVEL_UNSPECIFIED`），不能传字符串
-   > `'THINKING_LEVEL_UNSPECIFIED'`，否则 LS 报 `cannot decode field ... thinking_level` 错误，导致登录卡死（见坑 8）。
-   > **已知限制**：前端下拉列表仅渲染约 10 项，超过 3 个的自定义模型不会出现在下拉中；且显示名称含分级关键字
-   > （`flash`/`lite`/`low`/`medium`/`high`/`pro`/`tier`）的模型可能被前端过滤，建议避免。
-
-2. **streamGenerateContent/generateContent**：Cloud Code 把 Gemini 请求包在一个 `request` 字段里：
-   ```json
-   {
-     "project": "...",
-     "requestId": "...",
-     "request": { "contents": [...], "systemInstruction": {...}, "generationConfig": {...} },
-     "model": "custom-deepseek-ai-deepseek-v4-pro"
-   }
-   ```
-   代理在格式翻译前先提取出 `request`。
-
-3. **systemInstruction**：Cloud Code 把模型身份/工具定义放在独立的 `systemInstruction` 字段中（不在 `contents` 内）。代理将其映射为 OpenAI 的 `role: "system"` 或 Anthropic 的 `system` 参数。
-
-4. **响应信封**：Cloud Code 把响应包装为 `{"response": {...}, "traceId": "...", "metadata": {}}`。代理镜像该格式，使 IDE 能接受响应。
-
-### 请求/响应流程
-
-```
-1. 用户选择自定义模型并发送消息
-2. IDE → POST /v1internal:streamGenerateContent?alt=sse → 本地代理
-3. 代理检测自定义模型匹配（按 slug 或基于哈希的 MODEL_PLACEHOLDER_* ID）
-4. 提取 reqJson.request → 将 systemInstruction + contents 映射为提供商格式
-5. POST 到外部 API（如 https://api.together.xyz/v1/chat/completions）
-6. 将外部响应映射回 Gemini 格式
-7. 包装进 Cloud Code 信封 {"response": {...}, "traceId": "", "metadata": {}}
-8. 返回 SSE：data: {envelope}\n\n → IDE 展示响应
+```powershell
+.\deploy-ide.ps1 -IdePath "C:\Users\<User>\AppData\Local\Programs\Antigravity IDE"
 ```
 
-### 流式修复（关键）
+脚本自动完成：
+1. 构建 TypeScript → `dist/`（`npm run build`）
+2. 将 `main.js`、语言服务器二进制备份到 `resources\app_backup\`（含一键 `rollback.ps1`）
+3. 将代理运行时文件部署到 `resources\app\out\proxy\` 并安装 `electron-log`
+4. 在 `out\main.js` 顶部注入 ESM 动态 `import('./proxy/bootstrap.js')`
+5. 写入 `jetski.cloudCodeUrl` → 本地代理 URL（幂等）
+6. （可选）对语言服务器二进制打补丁 — 用 `-SkipBinaryPatch` 跳过（此架构下非必需）
+7. 启动 IDE 并进行健康检查
 
-代理区分**元数据请求**（需缓冲以重写 URL）与**生成请求**（必须直接透传流式）。若代理缓冲 `streamGenerateContent` 或 `generateContent` 响应，Go 语言服务器会因等待流结束而超时，导致应用崩溃并提示“terminated due to error”。
+> [!TIP]
+> IDE 采用解包式 `resources\app\` 布局（无 `app.asar`）。语言服务器的云端端点由 **`jetski.cloudCodeUrl`** 用户设置驱动，它会覆盖二进制内的硬编码 URL — 因此写入该设置是关键步骤。完整技术实现与 9 个已知坑见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
 
-- **元数据请求**（`v1internal:*`，不含生成）：缓冲、解压、重写 URL 指回本地代理
-- **生成请求**（`streamGenerateContent`、`generateContent`）：直接透传不缓冲，保留实时流式
+### 从源码构建（TypeScript）
 
-### 端点下发与路由（`jetski.cloudCodeUrl`）
-
-Antigravity IDE 通过用户设置项 `jetski.cloudCodeUrl` 将本地代理地址（`http://127.0.0.1:50999/v1internal/xxxxxxx`）动态下发给语言服务器（`--cloud_code_endpoint` 参数），使 IDE 的全部 Cloud Code 流量无缝路由至本地代理。代理对未经拦截的官方请求进行透明转发，对自定义模型进行实时拦截与协议转换。
-
-### DSML 工具调用解析器
-
-DeepSeek 模型（及部分其他提供商）以自定义的 **DSML**（DeepSeek Markup Language）格式在文本内容中返回工具调用：
-
-```xml
-<DSML|invoke name="search_web">
-  <DSML|parameter name="query" string="true">latest news</DSML|parameter>
-</DSML|invoke>
+```bash
+npm install
+npx tsc
 ```
 
-代理自动检测 DSML 块，将其解析为 Gemini 格式的 `functionCall` 对象，并从展示文本中剥离 XML。同时支持原生 OpenAI `tool_calls` 与 Anthropic `tool_use` 块。
-
-### Anthropic 工具调用
-
-Claude 模型（`anthropic` 提供商）以 `tool_use` 内容块返回工具调用。代理将其映射为 Gemini 格式的 `functionCall` 部分，设置 `finishReason: "TOOL_CALL"`，并保存工具调用 ID 以便在后续轮次与 `functionResponse` 对象匹配。流式（SSE `content_block_start`/`content_block_delta`）与非流式响应均已完整处理。
-
-### 安全：API 密钥加密
-
-所有 API 密钥通过 Electron `safeStorage` 以 **AES-256-GCM** 静态加密。`cryptoStore.ts` 模块提供：
-
-- **透明加解密**：密钥在落盘前加密，加载到内存时即时解密。
-- **自动迁移**：任何明文 `custom_models.json` 配置都会在首次运行时被自动检测、加密并重写。
-- **掩码展示**：UI 中的 API 密钥以 `sk-...XXXX`（仅末 4 位）展示，防止肩窥。
-- **系统级密钥存储**：macOS 上 `safeStorage` 使用 Keychain；Windows 上使用 DPAPI。
-
-### 动态端口管理
-
-本地代理使用**动态端口分配**并自动回退：
-
-```typescript
-// proxy.ts → startProxy()
-server.listen(50999, ...);  // 尝试默认端口
-server.on('error', (e) => {
-  if (e.code === 'EADDRINUSE') {
-    server.listen(0, ...);  // 回退：让 OS 选一个空闲端口
-  }
-});
-```
-
-若默认端口 `50999` 已被占用（如被另一实例或残留进程），代理自动回退到随机可用端口（`port: 0`）。`languageServer.ts` 模块读取动态分配的端口并在启动时注入 Go 语言服务器的 `--api_server_url` 参数，确保链路始终连通。
-
-### 并发请求隔离
-
-多个模型可同时发起请求而互不污染。状态以**按模型的 `Map` 结构**隔离，而非共享全局变量：
-
-- `modelToolCallIds`（`Map<modelName, { fnName: toolCallId }>`）将工具调用 ID 跟踪限定在每个模型
-- `modelReasoningContent`（`Map<modelName, string>`）将 DeepSeek 推理状态限定在每个模型
-- `activeStreamContexts`（`Map<streamId, context>`）将流式累加器限定在每个流
-
-### 自动状态清理
-
-代理状态通过托管的垃圾回收间隔自动清理：
-- **流上下文**：TTL 10 分钟
-- **工具调用 ID 与推理**：TTL 30 分钟
-- 间隔随 `startProxy()` 启动、随 `stopProxy()` 停止，避免遗留定时器
-
-### Schema 校验
-
-`schemaValidator.ts` 模块提供运行时校验，在畸形 API 响应到达 IDE 前端前拦截，避免晦涩报错。导出的校验器包括：
-
-| 函数 | 校验内容 |
-|---|---|
-| `validateCandidate` | 单个 Gemini candidate 结构 |
-| `validateGenerateContentResponse` | 完整 Gemini 响应载荷 |
-| `validateCloudCodeEnvelope` | Cloud Code `{ response, traceId, metadata }` 包装 |
-| `validateCustomModel` | 单个自定义模型配置（provider 枚举、URL 格式） |
-| `validateCustomModels` | 自定义模型配置数组 |
-| `validateGenerateContentRequest` | 请求体结构 |
-| `validateOpenAiChunk` | OpenAI 流式分块 |
-| `validateAnthropicEvent` | Anthropic SSE 事件类型 |
-
-### 模型连通性测试
-
-设置中每个自定义模型都有**“测试连接”**按钮，向模型 API 端点发送轻量请求：
-
-- 快速连通性检查（10 秒超时）
-- 绿色 ✅ 或红色 ❌ 状态指示
-- 针对常见问题（鉴权、超时、SSL）的有用错误信息
-- 通过 IPC 实现：`storage:test-model-connection`
-
-### 请求重试与限流
-
-代理自动以指数退避重试失败请求：
-
-- **触发条件**：429（限流）、502、503、504（服务器错误）
-- **退避**：1s → 2s → 4s → 8s（最多 3 次重试）
-- **Retry-After**：尊重服务端下发的 `Retry-After` 头
-- **可配置**：模型配置中的 `maxRetries` 字段（默认：3）
-
-## 仓库结构
-
-```
-antigravity-add-model/
-├── src/
-│   ├── proxy.ts                   # HTTP 代理 + Cloud Code 拦截器 + 格式翻译
-│   ├── proxy/
-│   │   ├── registry.ts            # 自动发现式翻译器注册表
-│   │   ├── shared.ts              # 跨轮次状态管理 + TTL 清理
-│   │   ├── modelUtils.ts          # 集中式模型能力检测
-│   │   └── translators/
-│   │       ├── openai.ts          # OpenAI ↔ Gemini 翻译器
-│   │       ├── anthropic.ts       # Anthropic ↔ Gemini 翻译器
-│   │       ├── google.ts          # Google AI Studio 透传 + 流路由
-│   │       └── utils.ts           # 翻译器共享工具（DSML、工具调用）
-│   ├── languageServer.ts          # 改造后的语言服务器管理器
-│   ├── ipcHandlers.ts             # 自定义模型 CRUD + 连通性测试 IPC
-│   ├── cryptoStore.ts             # AES-256-GCM API 密钥加解密
-│   ├── schemaValidator.ts         # 响应与模型的运行时 Schema 校验
-│   ├── preload.ts                 # 设置 UI 注入（内联添加模型面板）
-│   ├── main.ts                    # 应用生命周期 + SetCloudCodeURL 阻断
-│   ├── constants.ts               # 端口与证书常量
-│   ├── paths.ts                   # 路径工具
-│   ├── storage.ts                 # StorageManager 类
-│   ├── menu.ts                    # 应用菜单
-│   ├── tray.ts                    # 系统托盘
-│   ├── updater.ts                 # 自动更新器
-│   ├── customScheme.ts            # 插件 scheme 处理器
-│   ├── keybindings.ts             # 键盘快捷键
-│   ├── loadingOverlay.ts          # 加载遮罩
-│   ├── types.ts                   # 类型定义
-│   ├── utils.ts                   # 窗口管理与工具
-│   ├── services/
-│   │   └── settingsService.ts
-│   ├── ideInstall/                # IDE 安装向导
-│   ├── __tests__/                  # 单元测试（vitest）
-│   │   ├── registry.test.ts
-│   │   ├── proxy.test.ts
-│   │   ├── modelUtils.test.ts
-│   │   ├── anthropic.test.ts
-│   │   ├── openai.test.ts
-│   │   └── utils.test.ts
-│   ├── __mocks__/                 # 测试 mock
-├── dist/                          # 编译后的 JavaScript 输出
-├── tsconfig.json                  # TypeScript 配置
-├── deploy-ide.ps1                 # Antigravity IDE 一键部署脚本
-├── DEPLOY_ANTIGRAVITY_IDE.md      # IDE 部署指南
-├── package.json                   # Electron 应用清单
-└── README.md
-```
+---
 
 ## 支持的提供商
 
@@ -286,7 +72,7 @@ antigravity-add-model/
 
 > [!IMPORTANT]
 > **第三方模型平台（商汤 SenseNova、硅基流动 SiliconFlow、阿里百炼 DashScope、智谱 AI 等）配置须知**：
-> 在 `custom_models.json` 中，`provider` 字段指的是**协议翻译器类型**，而非厂商品牌名。只要平台提供的是标准 OpenAI 兼容的 `/v1/chat/completions` 接口，`provider` **必须填写 `"openai"` 或 `"custom"`**，切勿填写 `"SenseNova"` 等自定义名称，否则代理将无法识别协议类型并导致请求透传报错 400（详见 [DEPLOY_ANTIGRAVITY_IDE.md](DEPLOY_ANTIGRAVITY_IDE.md) 坑 9）。
+> 在 `custom_models.json` 中，`provider` 字段指的是**协议翻译器类型**，而非厂商品牌名。只要平台提供的是标准 OpenAI 兼容的 `/v1/chat/completions` 接口，`provider` **必须填写 `"openai"` 或 `"custom"`**，切勿填写 `"SenseNova"` 等自定义名称，否则代理将无法识别协议类型并导致请求透传报错 400（详见 [ARCHITECTURE.md](./ARCHITECTURE.md) 坑 9）。
 
 > [!NOTE]
 > 对于**自定义**提供商，以 `/v1` 结尾的 URL 会自动追加 `/chat/completions`。它与 Together AI、OpenRouter、Groq、Mistral 及任何其他 OpenAI 兼容端点完全兼容。
@@ -296,67 +82,6 @@ antigravity-add-model/
 
 > [!NOTE]
 > 对于 **Google AI Studio**，提供完整端点 URL 或仅基础 `https://generativelanguage.googleapis.com/v1beta/models/`。代理根据请求是否为流式自动判断 `streamGenerateContent` 还是 `generateContent`。
-
----
-
-## 安装
-
-### 一键部署（Antigravity IDE）
-
-```powershell
-.\deploy-ide.ps1 -IdePath "C:\Users\<User>\AppData\Local\Programs\Antigravity IDE"
-```
-
-脚本自动完成：
-1. 构建 TypeScript → `dist/`（`npm run build`）
-2. 将 `main.js`、`workbench.desktop.main.js`、语言服务器二进制备份到 `resources\app_backup\`（含一键 `rollback.ps1`）
-3. 将代理运行时文件部署到 `resources\app\out\proxy\` 并安装 `electron-log`
-4. 在 `out\main.js` 顶部注入 ESM 动态 `import('./proxy/bootstrap.js')`
-5. 写入 `jetski.cloudCodeUrl` → 本地代理 URL（幂等）
-6. （可选）对语言服务器二进制打补丁 — 用 `-SkipBinaryPatch` 跳过（此架构下非必需）
-7. 启动 IDE
-
-> [!TIP]
-> IDE 采用解包式 `resources\app\` 布局（无 `app.asar`）。语言服务器的云端端点由 **`jetski.cloudCodeUrl`** 用户设置驱动，它会覆盖二进制内的硬编码 URL — 因此写入该设置是关键步骤。完整指南、架构与 5 个已知坑见 [DEPLOY_ANTIGRAVITY_IDE.md](DEPLOY_ANTIGRAVITY_IDE.md)。
-
-### 从源码构建（TypeScript）
-
-```bash
-npm install
-npx tsc
-```
-
----
-
-## Antigravity 更新恢复
-
-### 问题
-
-自 **Antigravity v2.0.6** 起，语言服务器的 `fetchAvailableModels` 调用指向 `https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels`。若不拦截，自定义模型不会出现在聊天下拉列表中 — 只有 Google 内置的 Gemini 模型。
-
-### 修复（IDE 架构）
-
-在 **Antigravity IDE（VS Code Fork）** 架构下，语言服务器从用户设置 **`jetski.cloudCodeUrl`** 读取云端端点，并通过 `--cloud_code_endpoint` 传入。这会**覆盖**二进制内的硬编码 URL，因此二进制补丁在此**非必需**。`deploy-ide.ps1` 写入：
-
-```json
-"jetski.cloudCodeUrl": "http://127.0.0.1:50999/v1internal/xxxxxxx"
-```
-
-将全部 Cloud Code 流量导向本地代理是安全的 — 未被拦截的请求会透传到官方端点。`/v1internal/xxxxxxx` 填充由代理在转发给 Google 前剥离。
-
-### 每次 IDE 更新后
-
-Antigravity IDE 自动更新会覆盖已注入的文件（`out\main.js`、`out\proxy\`、可选的 LS 二进制）。重跑部署脚本即可全部恢复：
-
-```powershell
-.\deploy-ide.ps1 -IdePath "C:\Users\<User>\AppData\Local\Programs\Antigravity IDE"
-```
-
-> [!IMPORTANT]
-> `settings.json`（`jetski.cloudCodeUrl`）与 `custom_models.json` 在更新后不受影响，因此只需重新注入文件。
-
-> [!NOTE]
-> 完整恢复流程、日志位置与验证清单见 [DEPLOY_ANTIGRAVITY_IDE.md](DEPLOY_ANTIGRAVITY_IDE.md)。
 
 ---
 
@@ -434,6 +159,8 @@ Antigravity IDE 自动更新会覆盖已注入的文件（`out\main.js`、`out\p
 | `timeout` | （可选）请求超时（毫秒）。默认：`120000`（2 分钟）。 |
 | `maxRetries` | （可选）限流/失败请求的最大重试次数。默认：`3`。 |
 
+---
+
 ## UI 功能
 
 ### 添加模型弹窗
@@ -506,6 +233,35 @@ Antigravity IDE 自动更新会覆盖已注入的文件（`out\main.js`、`out\p
 
 ---
 
+## Antigravity 更新恢复
+
+### 问题
+
+自 **Antigravity v2.0.6** 起，语言服务器的 `fetchAvailableModels` 调用指向 `https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels`。若不拦截，自定义模型不会出现在聊天下拉列表中 — 只有 Google 内置的 Gemini 模型。
+
+### 修复（IDE 架构）
+
+在 **Antigravity IDE（VS Code Fork）** 架构下，语言服务器从用户设置 **`jetski.cloudCodeUrl`** 读取云端端点，并通过 `--cloud_code_endpoint` 传入。这会**覆盖**二进制内的硬编码 URL，因此二进制补丁在此**非必需**。`deploy-ide.ps1` 写入：
+
+```json
+"jetski.cloudCodeUrl": "http://127.0.0.1:50999/v1internal/xxxxxxx"
+```
+
+将全部 Cloud Code 流量导向本地代理是安全的 — 未被拦截的请求会透传到官方端点。`/v1internal/xxxxxxx` 填充由代理在转发给 Google 前剥离。
+
+### 每次 IDE 更新后
+
+Antigravity IDE 自动更新会覆盖已注入的文件（`out\main.js`、`out\proxy\`、可选的 LS 二进制）。重跑部署脚本即可全部恢复：
+
+```powershell
+.\deploy-ide.ps1 -IdePath "C:\Users\<User>\AppData\Local\Programs\Antigravity IDE"
+```
+
+> [!IMPORTANT]
+> `settings.json`（`jetski.cloudCodeUrl`）与 `custom_models.json` 在更新后不受影响，因此只需重新注入文件。
+
+---
+
 ## 故障排查
 
 ### 端口冲突
@@ -526,7 +282,7 @@ Antigravity IDE 自动更新会覆盖已注入的文件（`out\main.js`、`out\p
 2. 检查 `apiUrl` 是否正确
 3. 添加模型后重启 Antigravity
 4. 用**测试连接**按钮验证端点可达性
-5. 若自定义模型超过 3 个，注意前端下拉列表仅渲染约 10 项，多余模型不会出现在下拉中（见上文"工作原理"中的已知限制）
+5. 若自定义模型超过 3 个，注意前端下拉列表仅渲染约 10 项，多余模型不会出现在下拉中（见 DEPLOY 文档“已知限制”）
 6. 若模型显示名称含 `flash`/`lite`/`low`/`medium`/`high`/`pro`/`tier` 等分级词汇，可能被前端过滤，请改名后重试
 
 ### 连接超时
@@ -540,42 +296,7 @@ Antigravity IDE 自动更新会覆盖已注入的文件（`out\main.js`、`out\p
 2. 调大模型配置中的 `maxRetries`
 3. 查看你的 API 提供商限流面板
 
----
-
-## 开发者指南
-
-### 项目准备
-
-```bash
-npm install          # 安装依赖
-npx tsc              # 编译 TypeScript → dist/
-npx tsc --watch      # 开发用监听模式
-```
-
-### 添加新提供商
-
-1. 创建 `src/proxy/translators/<provider>.ts`，导出：
-   - `mapGeminiTo<Provider>(geminiBody, modelName)` → 提供商格式请求
-   - `map<Provider>ToGemini(providerRes, modelName)` → Gemini 格式响应
-   - `map<Provider>ChunkToGemini(chunk, modelName)` → 流式分块处理器
-2. 注册表会自动发现新翻译器模块，无需改配置
-3. 若鉴权方式不同，在 `registry.ts` 的 `getProviderHeaders()` 中添加该提供商
-4. 在 `src/preload.ts` 的 UI 下拉中添加该提供商选项
-5. 若适用，在 `registry.ts` 中更新 `supportsStreaming()`
-
-### TypeScript 架构
-
-- **严格模式**：`tsconfig.json` 中 `strict: true`（target: ES2020，module: CommonJS）
-- **集中式类型**：模型能力在 `modelUtils.ts`，共享状态在 `shared.ts`
-- **无 `eval()`**：JSON 修复使用 `repairPartialJson()`，而非危险的 `eval()` 调用
-- **关键路径无 `any`**：请求/响应映射使用显式接口
-
-### 调试模式
-```powershell
-$env:HEADLESS="1"; .\Antigravity.exe
-```
-
-设置 `DEBUG=antigravity:*` 可获得详细日志（debug 级别会捕获流解析回退与线路层细节）。
+> 更多深层排障（如 LS 崩溃、协议 400、登录卡死等）见 [ARCHITECTURE.md](./ARCHITECTURE.md) 的“踩坑实录与深度排障”与“关键日志位置速查”。
 
 ---
 
@@ -586,6 +307,8 @@ $env:HEADLESS="1"; .\Antigravity.exe
 2. 新增提供商翻译器同时包含请求与响应映射
 3. 安全敏感代码避免 `eval`、明文密钥日志、不当的 SSL 处理
 4. TypeScript 可干净编译：`npx tsc --noEmit`
+
+> 开发与架构细节（协议翻译、流式、Schema 校验、添加新提供商指南）见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
 
 ---
 
