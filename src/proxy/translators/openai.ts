@@ -182,6 +182,18 @@ interface DSMLParsedResult {
   cleanText: string;
 }
 
+/**
+ * Returns true when `text` contains a DSML tool-call marker that has been opened
+ * but not yet closed (e.g. a `<DSML|tool_calls>` / `<DSML|tool_call ...>` whose
+ * matching `</DSML|...>` has not streamed yet). Used to hold partial markup back
+ * so it never leaks as visible text while a tool-call block is still in flight.
+ */
+function hasUnclosedDSMLBlock(text: string): boolean {
+  const opens = (text.match(/<DSML\|/g) || []).length;
+  const closes = (text.match(/<\/DSML\|/g) || []).length;
+  return opens > closes;
+}
+
 // ─── REQUEST: Gemini → OpenAI ──────────────────────────────────────────────
 
 function mapGeminiToolsToOpenAI(geminiTools: GeminiTool[]): OpenAITool[] {
@@ -385,16 +397,33 @@ export function mapGeminiToOpenAI(
 
 // ─── RESPONSE: OpenAI → Gemini ─────────────────────────────────────────────
 
+/** DSML metadata keys embedded in the JSON body that must not be forwarded as tool args. */
+const DSML_METADATA_KEYS = ['toolSummary', 'toolAction', 'WaitMsBeforeAsync', 'waitMsBeforeAsync'];
+
+/** Extracts the first JSON object found inside `body` (surrounding text tolerated). */
+function extractJsonObject(body: string): Record<string, unknown> | null {
+  const start = body.indexOf('{');
+  if (start === -1) return null;
+  const end = body.lastIndexOf('}');
+  if (end <= start) return null;
+  try {
+    const value = JSON.parse(body.slice(start, end + 1));
+    return value && typeof value === 'object' ? (value as Record<string, unknown>) : null;
+  } catch (e) {
+    log.debug('[OpenAI] DSML JSON param parse failed:', (e as Error).message);
+    return null;
+  }
+}
+
 function parseDSMLToolCalls(text: string): DSMLParsedResult | null {
   try {
-    const invokeRegex = /<DSML\|invoke name="([^"]+)">([\s\S]*?)<\/DSML\|invoke>/g;
     const functionCalls: { name: string; args: Record<string, unknown> }[] = [];
-    let invokeMatch: RegExpExecArray | null;
-    while ((invokeMatch = invokeRegex.exec(text)) !== null) {
-      const funcName = invokeMatch[1];
-      const paramsBlock = invokeMatch[2];
+    const consumedBlocks: string[] = [];
+
+    const addParams = (name: string, paramsBlock: string): void => {
       const args: Record<string, unknown> = {};
-      const paramRegex = /<DSML\|parameter name="([^"]+)"(?: string="([^"]+)")?>([\s\S]*?)<\/DSML\|parameter>/g;
+      const paramRegex =
+        /<DSML\|parameter\s+name="([^"]+)"(?:\s+string="([^"]+)")?>([\s\S]*?)<\/DSML\|parameter>/g;
       let paramMatch: RegExpExecArray | null;
       while ((paramMatch = paramRegex.exec(paramsBlock)) !== null) {
         const paramName = paramMatch[1];
@@ -409,15 +438,45 @@ function parseDSMLToolCalls(text: string): DSMLParsedResult | null {
         }
         args[paramName] = paramValue;
       }
-      functionCalls.push({ name: funcName, args });
+      functionCalls.push({ name, args });
+    };
+
+    // Pass 1: items carrying a `name` attribute whose children are `<DSML|parameter>`
+    // blocks. Both SenseNova's `<DSML|tool_call name="...">` and the plain
+    // `<DSML|invoke name="...">` form share this structure.
+    const callRegex = /<DSML\|(?:invoke|tool_call)\s+name="([^"]+)">([\s\S]*?)<\/DSML\|(?:invoke|tool_call)>/g;
+    let callMatch: RegExpExecArray | null;
+    while ((callMatch = callRegex.exec(text)) !== null) {
+      if (callMatch[0]) consumedBlocks.push(callMatch[0]);
+      addParams(callMatch[1], callMatch[2]);
     }
+
+    // Pass 2: attribute-less tags (e.g. `<DSML|_command>`) whose body is a raw JSON
+    // object. The tag name itself denotes the tool (a leading underscore is dropped).
+    // Structural tags (`tool_calls`/`tool_call`/`invoke`/`parameter`) are excluded here.
+    const jsonRegex =
+      /<DSML\|((?!tool_calls|tool_call|invoke|parameter)[A-Za-z_][\w]*)>([\s\S]*?)<\/DSML\|\1>/g;
+    let jsonMatch: RegExpExecArray | null;
+    while ((jsonMatch = jsonRegex.exec(text)) !== null) {
+      const args = extractJsonObject(jsonMatch[2]);
+      if (!args || Object.keys(args).length === 0) continue;
+      let name = jsonMatch[1].replace(/^_+/, '');
+      if (args.CommandLine !== undefined || args.Cwd !== undefined) name = 'run_command';
+      for (const key of DSML_METADATA_KEYS) delete args[key];
+      if (jsonMatch[0]) consumedBlocks.push(jsonMatch[0]);
+      functionCalls.push({ name, args });
+    }
+
     if (functionCalls.length === 0) return null;
     log.info(
       `[Proxy] Detected ${functionCalls.length} DSML tool call(s): ${functionCalls.map((f) => f.name).join(', ')}`,
     );
     let cleanText = text;
+    for (const block of consumedBlocks) cleanText = cleanText.split(block).join('');
     cleanText = cleanText.replace(/<DSML\|tool_calls>[\s\S]*?<\/DSML\|tool_calls>/g, '');
-    cleanText = cleanText.replace(/<DSML\|invoke name="[^"]+">[\s\S]*?<\/DSML\|invoke>/g, '');
+    cleanText = cleanText.replace(/<DSML\|parameter[^>]*>[\s\S]*?<\/DSML\|parameter>/g, '');
+    // Strip any stray / unterminated DSML markers left behind (e.g. cut-off streams).
+    cleanText = cleanText.replace(/<\/?DSML\|[^>]*>/g, '');
     cleanText = cleanText.trim();
     return { functionCalls, cleanText };
   } catch (e) {
@@ -562,9 +621,22 @@ export function mapOpenAIChunkToGemini(
   if (reasoning) context.accumulatedReasoning += reasoning;
   if (text) context.accumulatedText += text;
 
+  // While a DSML tool-call block is only partially streamed, hold its raw markup
+  // back so `DSML | tool_calls` never flashes as visible text. A lead-in sentence
+  // that precedes the first `<DSML|` marker is still emitted immediately.
+  const prevAcc = context.accumulatedText.slice(0, context.accumulatedText.length - text.length);
+  const alreadyInsideDSML = hasUnclosedDSMLBlock(prevAcc);
   const emitParts: GeminiPart[] = [];
   if (reasoning) emitParts.push({ text: reasoning, thought: true });
-  if (text) emitParts.push({ text });
+  if (text) {
+    if (alreadyInsideDSML) {
+      // Entire delta is inside an in-flight DSML block: hold it entirely.
+    } else {
+      const dsmIdx = text.indexOf('<DSML|');
+      const safePrefix = dsmIdx >= 0 ? text.slice(0, dsmIdx) : text;
+      if (safePrefix) emitParts.push({ text: safePrefix });
+    }
+  }
 
   const dsml = parseDSMLToolCalls(context.accumulatedText);
   if (dsml && dsml.functionCalls.length > 0) {

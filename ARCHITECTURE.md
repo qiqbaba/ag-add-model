@@ -224,6 +224,8 @@ Antigravity 使用 Google 专有的 **Cloud Code 内部 API**（`v1internal:*` �
 ```
 [`src/proxy/translators/utils.ts`](file:///d:/programme/antigravity-add-model/src/proxy/translators/utils.ts) 自动捕获该模式，将其转换为 Gemini 标准的 `functionCall` 对象，并从文本流中剔除原始 XML 标记。
 
+**演进变体**：部分宿主（如商汤 SenseNova 的 `deepseek-v4-flash`）把同一结构包进容器，改用 `<DSML|tool_calls> ... <DSML|tool_call name="..."> ... </DSML|tool_call> ... </DSML|tool_calls>`。解析器（`parseDSMLToolCalls`）对 `<DSML|invoke>` 与 `<DSML|tool_call>` 两种条目标签统一匹配（均以 `name` 属性和 `<DSML|parameter>` 子元素为准），并在流式阶段对**未闭合**的 DSML 块先「hold」住其原始标记，块闭合后才发射 `functionCall`，避免 `DSML | tool_calls` 等原始标签以文本形式泄漏到界面。对应回归用例见 `src/__tests__/openai.test.ts` 的 `mapOpenAIToGemini DSML tool_call wrapper`。**
+
 #### 2. 原生工具调用转换与参数归一化
 * **OpenAI** `tool_calls` 与 **Anthropic** `tool_use` 会双向映射为 Gemini 的 `functionCall` / `functionResponse`。
 * 内置参数别名归一化（如把模型输出的 `absolute_path`、`filePath` 映射为 Antigravity 预期的 `AbsolutePath`）。

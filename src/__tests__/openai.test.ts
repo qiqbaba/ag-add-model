@@ -526,3 +526,161 @@ describe('mapOpenAIChunkToGemini', () => {
     expect(fcParts.length).toBeGreaterThan(0);
   });
 });
+
+// ─── SenseNova / DeepSeek-V4 DSML `tool_calls`/`tool_call` wrapper format ──
+
+describe('mapOpenAIToGemini DSML tool_call wrapper', () => {
+  const wrapperBlock = [
+    '<DSML|tool_calls>',
+    '<DSML|tool_call name="run_command">',
+    '<DSML|parameter name="CommandLine" string="true">dir</DSML|parameter>',
+    '<DSML|parameter name="Cwd" string="true">D:\\repo</DSML|parameter>',
+    '</DSML|tool_call>',
+    '</DSML|tool_calls>',
+  ].join('\n');
+
+  it('should parse tool_call wrapped inside tool_calls into a functionCall', () => {
+    const res = {
+      choices: [
+        {
+          message: { content: wrapperBlock },
+          finish_reason: 'stop',
+        },
+      ],
+      usage: { prompt_tokens: 5, completion_tokens: 10, total_tokens: 15 },
+    };
+    const result = mapOpenAIToGemini(res, 'deepseek-v4');
+    expect(result.candidates[0].finishReason).toBe('TOOL_CALL');
+    const fcParts = result.candidates[0].content.parts.filter((p) => p.functionCall);
+    expect(fcParts.length).toBe(1);
+    expect(fcParts[0].functionCall!.name).toBe('list_dir');
+    expect(fcParts[0].functionCall!.args).toEqual({ DirectoryPath: 'D:\\repo' });
+    // raw markup must not leak into text parts
+    const text = result.candidates[0].content.parts
+      .filter((p) => p.text)
+      .map((p) => p.text!)
+      .join('');
+    expect(text).not.toContain('DSML');
+  });
+
+  it('should register tool_call-wrapper calls for response round-trip', () => {
+    const res = {
+      choices: [{ message: { content: wrapperBlock }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 5, completion_tokens: 10, total_tokens: 15 },
+    };
+    const result = mapOpenAIToGemini(res, 'deepseek-v4');
+    const fcParts = result.candidates[0].content.parts.filter((p) => p.functionCall);
+    const id = fcParts[0].functionCall!.id!;
+    expect(shared.modelToolCallIds.get('deepseek-v4')?.['run_command']).toBe(id);
+    expect(shared.translatedToolCalls.get(id)?.originalName).toBe('run_command');
+    expect(shared.translatedToolCalls.get(id)?.translatedName).toBe('list_dir');
+    expect(shared.translatedToolCalls.get(id)?.cmd).toBe('dir');
+  });
+
+  it('should still extract a complete tool_call when the outer tool_calls wrapper is unclosed', () => {
+    const truncated = [
+      'Some intro.',
+      '<DSML|tool_calls>',
+      '<DSML|tool_call name="run_command">',
+      '<DSML|parameter name="CommandLine" string="true">dir</DSML|parameter>',
+      '</DSML|tool_call>',
+    ].join('\n');
+    const res = {
+      choices: [{ message: { content: truncated }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 5, completion_tokens: 10, total_tokens: 15 },
+    };
+    const result = mapOpenAIToGemini(res, 'deepseek-v4');
+    expect(result.candidates[0].finishReason).toBe('TOOL_CALL');
+    const fcParts = result.candidates[0].content.parts.filter((p) => p.functionCall);
+    expect(fcParts.length).toBe(1);
+    expect(fcParts[0].functionCall!.name).toBe('list_dir');
+    // intro text survives, but no DSML markup leaks
+    const text = result.candidates[0].content.parts
+      .filter((p) => p.text)
+      .map((p) => p.text!)
+      .join('');
+    expect(text).toContain('Some intro.');
+    expect(text).not.toContain('DSML');
+  });
+
+  it('should NOT extract a genuinely incomplete tool_call (no closing tag) and fall through to text', () => {
+    const truncated = [
+      'Some intro.',
+      '<DSML|tool_calls>',
+      '<DSML|tool_call name="run_command">',
+      '<DSML|parameter name="CommandLine" string="true">dir</DSML|parameter>',
+    ].join('\n');
+    const res = {
+      choices: [{ message: { content: truncated }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 5, completion_tokens: 10, total_tokens: 15 },
+    };
+    const result = mapOpenAIToGemini(res, 'deepseek-v4');
+    expect(result.candidates[0].finishReason).not.toBe('TOOL_CALL');
+    const text = result.candidates[0].content.parts
+      .filter((p) => p.text)
+      .map((p) => p.text!)
+      .join('');
+    expect(text).toContain('Some intro.');
+  });
+
+  it('should hold partial DSML markup during streaming and emit the functionCall once the wrapper completes', () => {
+    const streamId = 'stream_wrapper';
+    const chunk1: { id: string; choices: { delta: { content: string }; index: number }[] } = {
+      id: streamId,
+      choices: [
+        {
+          delta: {
+            content:
+              'Lead in.\n<DSML|tool_calls>\n<DSML|tool_call name="run_command">\n<DSML|parameter name="CommandLine" string="true">dir</DSML|parameter>',
+          },
+          index: 0,
+        },
+      ],
+    };
+    const chunk2: { id: string; choices: { delta: { content: string }; index: number }[] } = {
+      id: streamId,
+      choices: [{ delta: { content: '\n</DSML|tool_call>\n</DSML|tool_calls>' }, index: 0 }],
+    };
+
+    const r1 = mapOpenAIChunkToGemini(chunk1, 'deepseek-v4');
+    // Unclosed block: lead-in is shown, raw markup is held back (never leaks as text)
+    const texts1 = (r1?.content.parts.filter((p) => p.text).map((p) => p.text!) || []).join('').trim();
+    expect(texts1).toBe('Lead in.');
+    expect(texts1).not.toContain('DSML');
+
+    const r2 = mapOpenAIChunkToGemini(chunk2, 'deepseek-v4');
+    // Completed block: a real functionCall is emitted, still no raw markup
+    expect(r2).not.toBeNull();
+    const fc = r2!.content.parts.filter((p) => p.functionCall);
+    expect(fc.length).toBe(1);
+    expect(fc[0].functionCall!.name).toBe('list_dir');
+    const texts2 = (r2!.content.parts.filter((p) => p.text).map((p) => p.text!) || []).join('');
+    expect(texts2).not.toContain('DSML');
+  });
+
+  it('should parse a bare DSML JSON-body tag such as <DSML|_command>{...}</DSML|_command>', () => {
+    const content =
+      '<DSML|_command>{"CommandLine":"git diff ARCHITECTURE.md","Cwd":"d:\\\\repo","WaitMsBeforeAsync":10000,"toolSummary":"Viewing ARCHITECTURE.md diff","toolAction":"Inspecting ARCHITECTURE.md changes"}</DSML|_command>';
+    const res = {
+      choices: [{ message: { content }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 5, completion_tokens: 10, total_tokens: 15 },
+    };
+    const result = mapOpenAIToGemini(res, 'deepseek-v4');
+    expect(result.candidates[0].finishReason).toBe('TOOL_CALL');
+    const fc = result.candidates[0].content.parts.filter((p) => p.functionCall);
+    expect(fc.length).toBe(1);
+    expect(fc[0].functionCall!.name).toBe('run_command');
+    expect(fc[0].functionCall!.args).toEqual({
+      CommandLine: 'git diff ARCHITECTURE.md',
+      Cwd: 'd:\\repo',
+    });
+    // metadata keys are stripped; raw markup never leaks into text
+    expect(fc[0].functionCall!.args).not.toHaveProperty('toolSummary');
+    expect(fc[0].functionCall!.args).not.toHaveProperty('WaitMsBeforeAsync');
+    const text = result.candidates[0].content.parts
+      .filter((p) => p.text)
+      .map((p) => p.text!)
+      .join('');
+    expect(text).not.toContain('DSML');
+  });
+});
