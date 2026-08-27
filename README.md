@@ -24,7 +24,11 @@
 ### 一键部署（Antigravity IDE）
 
 ```powershell
+# 基础部署
 .\deploy-ide.ps1 -IdePath "C:\Users\<User>\AppData\Local\Programs\Antigravity IDE"
+
+# 部署并自动在浏览器打开可视化管理面板
+.\deploy-ide.ps1 -IdePath "C:\Users\<User>\AppData\Local\Programs\Antigravity IDE" -OpenDashboard
 ```
 
 脚本自动完成：
@@ -156,10 +160,10 @@ npx tsc
 |---|---|
 | `name` | 内部模型标识符（如 `models/gpt-4o`）。必须以 `models/` 前缀开头。 |
 | `displayName` | 将出现在 Antigravity 聊天模型下拉列表中的友好名称。 |
-| `description` | 设置中自定义模型列表里展示的副标题/描述。 |
+| `description` | 管理面板与模型卡片中展示的副标题/描述。 |
 | `provider` | `openai`、`anthropic`、`openrouter`、`ollama`、`google` 或 `custom` 之一。决定请求与响应格式的翻译方式。 |
 | `apiKey` | 提供商的 API 凭证。本地提供商（如 Ollama）留空 `""`。 |
-| `apiUrl` | 目标端点。会根据 UI 下拉选择自动预填。 |
+| `apiUrl` | 目标端点。在 Web 面板选择预设或提供商时会自动预填。 |
 | `externalModelName` | 目标提供商所期望的精确模型 ID（如 `gpt-4o`、`claude-3-5-sonnet-latest`、`llama3`）。 |
 | `allowUnauthorized` | （可选）设为 `true` 可跳过 SSL 证书校验。适用于内部/自签名端点。默认：`false`。 |
 | `timeout` | （可选）请求超时（毫秒）。默认：`120000`（2 分钟）。 |
@@ -167,30 +171,31 @@ npx tsc
 
 ---
 
-## UI 功能
+## 可视化管理面板（Web Dashboard）
 
-### 添加模型弹窗
+代理服务原生集成了零依赖、现代化暗黑风格的**可视化配置与连通性测试 Web 单页应用（SPA）**，免去手动编辑 JSON 产生语法或格式错误的困扰。
 
-点击设置 → 模型中的**“添加模型”**按钮，打开一个精致弹窗，包含：
-- 提供商下拉（OpenAI、Anthropic、Google AI Studio、Ollama、OpenRouter、自定义）
-- 根据所选提供商自动预填 URL
-- 输入模型 ID 时动态生成 Google AI Studio URL
-- 带背景模糊的平滑进入/退出动画
-- 表单校验（必填：模型 ID、API 密钥、API URL）
-- 留空时自动生成展示名称
+- **访问入口**：在浏览器打开 [`http://127.0.0.1:50999/`](http://127.0.0.1:50999/)（或查阅 `%USERPROFILE%\.gemini\antigravity\dashboard_url`）。
+- **一键直达**：在执行部署脚本时加上 `-OpenDashboard` 开关（`.\deploy-ide.ps1 -OpenDashboard`），部署完成后将自动在默认浏览器中调出面板。
 
+### 核心特性
 
-### 自定义模型面板
-
-在设置 → 模型中，MCP 区块下方有一个“自定义模型”区，展示所有已配置模型，包含：
-- 模型名称与提供商/URL 详情
-- **测试连接**按钮，带绿色 ✅ / 红色 ❌ 状态指示
-- 列表项悬停效果
-- 带确认对话框的删除按钮
-- 未配置任何模型时的空状态占位
-- 添加/删除操作后自动刷新
-- **高效 DOM 监听**：使用 `MutationObserver` 加 200ms 防抖，替代 `setInterval(1000ms)`，大幅降低 CPU 开销。注入成功后观察器自动断开，并在 SPA 页面切换时通过 URL 变化检测重新挂载。
-
+1. **多厂商快速预设模板**：
+   - 顶部提供一键预填芯片：**DeepSeek 官方**、**DeepSeek-R1（深度思考）**、**OpenAI GPT-4o**、**Claude 3.5 Sonnet**、**Ollama 本地**、**OpenRouter 聚合**、**硅基流动 SiliconFlow**、**商汤日日新 SenseNova**、**月之暗面 Kimi**、**Google AI Studio** 等，点击即可一键填入标准 API Endpoint 与推荐参数。
+2. **智能连通性探测引擎**：
+   - 支持单个模型卡片 **“测试连接”** 与顶栏 **“一键测速全部”**，向目标上游发送真实轻量握手请求。
+   - 实时测量网络 **RTT 延迟（毫秒）**，并抓取模型真实输出片段。
+   - 针对 **401（Key 无效/过期）**、**403（区域/权限拦截）**、**404（端点或模型名不存在）**、**429（额度超限/限流）**、**ECONNREFUSED（Ollama 未启动）** 等常见异常，提供中文排障诊断与修复建议。
+3. **模型添加与编辑**：
+   - 提供精致的模态表单弹窗，支持配置模型标识、显示名称、Provider 协议、API Key（支持显隐切换）、API URL 及高级参数（超时时间、重试次数、自签名 SSL 跳过等）。
+   - 留空时自动生成友好的展示名称，并提供实时表单格式校验。
+4. **双向编辑模式（GUI + Raw JSON）**：
+   - 点击顶栏 **“Raw JSON”** 按钮可直接在弹出的语法高亮在线编辑器中查看或编辑完整的 `custom_models.json` 配置，内置一键格式化与实时 JSON 语法校验。
+5. **实时状态监控与搜索过滤**：
+   - 顶部状态栏实时展示代理当前监听端口、已加载模型总数、`safeStorage`（Windows DPAPI / macOS Keychain）密钥加密保护状态。
+   - 支持按模型标识、显示名称实时模糊搜索，支持按 Provider 分类筛选。
+6. **即时热重载与安全备份**：
+   - 任何修改保存后，代理自动对 API Key 执行 `safeStorage` 静态加密，自动创建 `.bak` 历史备份文件，并立即热重载内存模型池，**无需重启 IDE**。
 
 ### SSL 跳过（自签名 / 内部 CA）
 
