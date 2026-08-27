@@ -422,8 +422,7 @@ function parseDSMLToolCalls(text: string): DSMLParsedResult | null {
 
     const addParams = (name: string, paramsBlock: string): void => {
       const args: Record<string, unknown> = {};
-      const paramRegex =
-        /<DSML\|parameter\s+name="([^"]+)"(?:\s+string="([^"]+)")?>([\s\S]*?)<\/DSML\|parameter>/g;
+      const paramRegex = /<DSML\|parameter\s+name="([^"]+)"(?:\s+string="([^"]+)")?>([\s\S]*?)<\/DSML\|parameter>/g;
       let paramMatch: RegExpExecArray | null;
       while ((paramMatch = paramRegex.exec(paramsBlock)) !== null) {
         const paramName = paramMatch[1];
@@ -454,8 +453,7 @@ function parseDSMLToolCalls(text: string): DSMLParsedResult | null {
     // Pass 2: attribute-less tags (e.g. `<DSML|_command>`) whose body is a raw JSON
     // object. The tag name itself denotes the tool (a leading underscore is dropped).
     // Structural tags (`tool_calls`/`tool_call`/`invoke`/`parameter`) are excluded here.
-    const jsonRegex =
-      /<DSML\|((?!tool_calls|tool_call|invoke|parameter)[A-Za-z_][\w]*)>([\s\S]*?)<\/DSML\|\1>/g;
+    const jsonRegex = /<DSML\|((?!tool_calls|tool_call|invoke|parameter)[A-Za-z_][\w]*)>([\s\S]*?)<\/DSML\|\1>/g;
     let jsonMatch: RegExpExecArray | null;
     while ((jsonMatch = jsonRegex.exec(text)) !== null) {
       const args = extractJsonObject(jsonMatch[2]);
@@ -525,7 +523,9 @@ export function mapOpenAIToGemini(
         });
         touchStateTimestamp(stateTimestamps.translatedCalls, tc.id);
       }
-      parts.push({ functionCall: { name: translated.name, args: translated.args as Record<string, unknown>, id: tc.id } });
+      parts.push({
+        functionCall: { name: translated.name, args: translated.args as Record<string, unknown>, id: tc.id },
+      });
     }
     return {
       candidates: [{ content: { parts, role: 'model' }, finishReason: 'TOOL_CALL', index: 0 }],
@@ -694,7 +694,9 @@ export function mapOpenAIChunkToGemini(
           });
           touchStateTimestamp(stateTimestamps.translatedCalls, tc.id);
         }
-        parts.push({ functionCall: { name: translated.name, args: translated.args as Record<string, unknown>, id: tc.id } });
+        parts.push({
+          functionCall: { name: translated.name, args: translated.args as Record<string, unknown>, id: tc.id },
+        });
       }
       activeStreamContexts.delete(streamId);
       return { content: { parts, role: 'model' }, finishReason: 'TOOL_CALL', index: 0 };
@@ -759,7 +761,9 @@ export function mapOpenAIChunkToGemini(
         });
         touchStateTimestamp(stateTimestamps.translatedCalls, tc.id);
       }
-      parts.push({ functionCall: { name: translated.name, args: translated.args as Record<string, unknown>, id: tc.id } });
+      parts.push({
+        functionCall: { name: translated.name, args: translated.args as Record<string, unknown>, id: tc.id },
+      });
     }
     activeStreamContexts.delete(streamId);
     return { content: { parts, role: 'model' }, finishReason: 'TOOL_CALL', index: 0 };

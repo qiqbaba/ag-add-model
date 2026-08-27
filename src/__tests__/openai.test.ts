@@ -159,10 +159,7 @@ describe('mapGeminiToOpenAI', () => {
       contents: [
         {
           role: 'user',
-          parts: [
-            { text: 'Describe this image' },
-            { inlineData: { mimeType: 'image/png', data: 'AAAA' } },
-          ],
+          parts: [{ text: 'Describe this image' }, { inlineData: { mimeType: 'image/png', data: 'AAAA' } }],
         },
       ],
     };
@@ -271,7 +268,11 @@ describe('mapOpenAIToGemini', () => {
         {
           message: {
             tool_calls: [
-              { id: 'call_a', type: 'function' as const, function: { name: 'run_command', arguments: '{"CommandLine":"ls","Cwd":"/repo"}' } },
+              {
+                id: 'call_a',
+                type: 'function' as const,
+                function: { name: 'run_command', arguments: '{"CommandLine":"ls","Cwd":"/repo"}' },
+              },
             ],
           },
           finish_reason: 'tool_calls',
@@ -284,7 +285,11 @@ describe('mapOpenAIToGemini', () => {
         {
           message: {
             tool_calls: [
-              { id: 'call_b', type: 'function' as const, function: { name: 'run_command', arguments: '{"CommandLine":"ls","Cwd":"/repo2"}' } },
+              {
+                id: 'call_b',
+                type: 'function' as const,
+                function: { name: 'run_command', arguments: '{"CommandLine":"ls","Cwd":"/repo2"}' },
+              },
             ],
           },
           finish_reason: 'tool_calls',

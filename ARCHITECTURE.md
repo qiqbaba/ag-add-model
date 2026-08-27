@@ -22,6 +22,7 @@
   - [3.1 IDE 架构要点](#31-ide-架构要点)
   - [3.2 一键部署流程（deploy-ide.ps1）](#32-一键部署流程deploy-ideps1)
   - [3.3 custom_models.json 配置规范与加解密](#33-custom_modelsjson-配置规范与加解密)
+  - [3.4 可视化配置与连通性测试面板（Web Dashboard & RESTful API）](#34-可视化配置与连通性测试面板web-dashboard--restful-api)
 - [四、踩坑实录与深度排障（1~10 坑完整收录）](#四踩坑实录与深度排障110-坑完整收录)
   - [坑 1：require 静默失败（ESM 主进程）](#坑-1require-静默失败esm-主进程)
   - [坑 2：Content-Length 与 Transfer-Encoding 冲突（Parse Error）](#坑-2content-length-与-transfer-encoding-冲突parse-error)
@@ -381,6 +382,31 @@ OpenAI 兼容自定义模型（`openai` / `custom` / `openrouter` / `ollama` 等
 > **API 密钥加密机制**：
 > 初始手动填写明文 API Key 时，设置 `"encrypted": false`（或留空）。代理服务启动后会自动调用 Electron `safeStorage`（Windows DPAPI / macOS Keychain）对密钥进行 AES-256-GCM 静态加密，并将 `"encrypted"` 自动置为 `true`。
 
+### 3.4 可视化配置与连通性测试面板（Web Dashboard & RESTful API）
+
+为解决 VS Code Fork 独立版中手动编辑 `custom_models.json` 容易产生格式/Schema 错误且无法排障连通性的痛点，本地代理服务（`http://127.0.0.1:<active_port>`，默认 `50999`）原生集成了**可视化模型管理面板与连通性探测引擎**：
+
+* **访问入口**：`http://127.0.0.1:50999/`（或查阅 `%USERPROFILE%\.gemini\antigravity\dashboard_url`）
+* **核心功能**：
+  1. **多厂商快速预设**：一键预填 DeepSeek、OpenAI、Claude 3.5、Ollama、OpenRouter、Google AI Studio、硅基流动、商汤日日新、月之暗面等厂商标准 API Endpoint 与协议规则。
+  2. **实时连通性探测**：发送真实握手测试，测量网络 RTT 延迟（毫秒），并针对 401（Key 无效）、403（IP/权限拦截）、404（路径/模型名错误）、429（额度超限）、ECONNREFUSED（Ollama 未启动）等提供中文排障诊断与修复建议。
+  3. **一键测速全部**：批量测试所有已配置模型并展示状态汇总。
+  4. **双向编辑模式**：支持表单级交互与 Raw JSON 语法高亮校验编辑器。
+  5. **即时热重载**：保存后自动执行 Schema 校验、`safeStorage` 密钥加密与 `.bak` 备份，并即时热重载代理内存模型池，无需重启 IDE。
+
+#### 代理内置 RESTful API 路由清单
+
+| Method | Endpoint | 说明 |
+| :--- | :--- | :--- |
+| `GET` | `/` 或 `/dashboard` | 返回可视化管理 Web 面板单页应用 (SPA) |
+| `GET` | `/api/status` | 获取代理运行状态（端口、内存占用、加密状态、配置路径等） |
+| `GET` | `/api/models` | 获取模型列表视图（含脱敏 API Key、能力元数据与 Schema 校验状态） |
+| `POST` | `/api/models` | 新增或更新自定义模型（自动 Schema 校验、加密与文件备份） |
+| `DELETE`| `/api/models` | 删除指定模型配置 |
+| `POST` | `/api/models/test` | 对指定模型配置执行连通性探测，返回延迟与诊断信息 |
+| `GET` | `/api/models/raw` | 读取 `custom_models.json` 原始 JSON 字符串 |
+| `PUT` | `/api/models/raw` | 校验并覆盖写入 `custom_models.json` |
+
 ---
 
 ## 四、踩坑实录与深度排障（1~10 坑完整收录）
@@ -473,6 +499,22 @@ OpenAI 兼容自定义模型（`openai` / `custom` / `openrouter` / `ollama` 等
 > **视觉“10 项”截断 ≠ 数据丢失**。两者独立存在：
 > * 数据侧：同名 slug 覆写导致少注入模型 → 本坑 10 修复；
 > * 视觉侧：前端下拉面板 `POu` 的 `max-h-80`（320px）+ `scrollbar-none` + `overflow-hidden` 会裁剪约 10 项 → 由 `deploy-ide.ps1` 第 6 步的 85vh/600px 高度与滚动补丁解除。部署时务必确认 workbench 补丁已生效（`debug_fetchAvailableModels.json` 中模型齐全但界面仍显示不全时，多为补丁因 IDE 更新失效）。
+
+---
+
+### 坑 11：Web 面板打不开 / 返回 Google 404（部署副本过期）
+
+* **症状**：浏览器访问 `http://127.0.0.1:50999/` 显示 **Google 官网风格 404**（响应头 `server: scaffolding on HTTPServer2`、`alt-svc: h3=":443"`），而不是自检面板页面；代理日志无任何面板路由命中记录。
+* **根因**：IDE 安装目录 `resources\app\out\proxy\` 中正在运行的代理是**旧构建**，早于 Web 面板特性（`dashboardHtml.ts` / `connectionTest.ts` / `modelConfigManager.ts`）。旧 `proxy.js` **没有 `/` 面板路由**，因此对 `/` 的请求落入 Cloud Code 透传分支，被转发到 Google 官方端点而返回其 404。典型触发场景：代码更新（新增面板后）未重新部署，或 IDE 自动更新覆盖了 `out\proxy\`（见 README「每次 IDE 更新后」）。
+* **鉴别**：前往 `resources\app\out\proxy\proxy\` 目录，若**缺少** `dashboardHtml.js`、`connectionTest.js`、`modelConfigManager.js` 即为旧构建；也可比对 `out\proxy\proxy.js` 的修改时间与新 `dist\proxy.js`，二者不一致即过期。
+* **修复**：重新部署即可恢复 —— 关闭 IDE 后重新执行：
+
+  ```powershell
+  .\deploy-ide.ps1 -IdePath "C:\Users\<User>\AppData\Local\Programs\Antigravity IDE"
+  ```
+
+  部署脚本会用新编译的 `dist` 覆盖 `out\proxy\`（含面板三部曲模块），并重启代理。完成后用 `Invoke-WebRequest http://127.0.0.1:50999/` 应返回 HTTP 200 与 `<!DOCTYPE html>`（约 68 KB SPA），即面板恢复。
+* **预防**：修改涉及 `src/proxy.ts`、`src/proxy/dashboardHtml.ts` 等代理源码后，务必重新运行 `deploy-ide.ps1`；IDE 自动更新后同样需重跑。任何情况下不要手工只改 `out\main.js` 注入而跳过代理模块部署。
 
 ---
 

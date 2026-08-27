@@ -27,6 +27,31 @@ export {
 
 export { detectModelCapabilities, detectModelCapabilitiesByName, type ModelCapabilities } from './proxy/modelUtils';
 
-export { syncSettingsJson, syncActivePort, getSettingsPath, getActivePortPath } from './proxy/settingsSync';
+export {
+  syncSettingsJson,
+  syncActivePort,
+  getSettingsPath,
+  getActivePortPath,
+  getDashboardUrlPath,
+  buildCloudCodeUrl,
+} from './proxy/settingsSync';
+
+export { renderDashboardHtml } from './proxy/dashboardHtml';
+
+export {
+  getModelsViewModel,
+  saveCustomModel,
+  deleteCustomModel,
+  getRawConfig,
+  saveRawConfig,
+  getSystemInfo,
+  readDecryptedModels,
+  maskApiKey,
+  generateSlug,
+  generatePlaceholderId,
+  type ModelViewModel,
+} from './proxy/modelConfigManager';
+
+export { testModelConnection, type TestConnectionParams, type TestConnectionResult } from './proxy/connectionTest';
 
 export * from './proxy/registry';

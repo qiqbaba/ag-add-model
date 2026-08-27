@@ -91,17 +91,29 @@ export function getActivePortPath(): string {
   return path.join(os.homedir(), '.gemini', 'antigravity', 'active_port');
 }
 
-// ─── active_port sync ───────────────────────────────────────────────────────
+/**
+ * Resolves the dashboard URL marker file path (~/.gemini/antigravity/dashboard_url).
+ */
+export function getDashboardUrlPath(): string {
+  return path.join(os.homedir(), '.gemini', 'antigravity', 'dashboard_url');
+}
+
+// ─── active_port & dashboard_url sync ────────────────────────────────────────
 
 /**
- * Persists the actually-bound proxy port to ~/.gemini/antigravity/active_port.
+ * Persists the actually-bound proxy port to ~/.gemini/antigravity/active_port and
+ * the dashboard URL to ~/.gemini/antigravity/dashboard_url.
  */
 export function syncActivePort(port: number): void {
   try {
     const filePath = getActivePortPath();
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, String(port), 'utf-8');
-    log.info(`[Proxy] Synced active_port => ${port} (${filePath})`);
+
+    const dashPath = getDashboardUrlPath();
+    fs.writeFileSync(dashPath, `http://127.0.0.1:${port}/`, 'utf-8');
+
+    log.info(`[Proxy] Synced active_port => ${port} (${filePath}), dashboard => http://127.0.0.1:${port}/`);
   } catch (e) {
     log.error('[Proxy] Failed to sync active_port:', e);
   }
@@ -302,12 +314,7 @@ function getLastTopLevelComma(content: string, open: number, close: number): num
  * Inserts a new property into a JSONC object body, preserving existing comments,
  * formatting, and any trailing comma. Returns the new content.
  */
-function insertProperty(
-  content: string,
-  bounds: { open: number; close: number },
-  key: string,
-  value: string,
-): string {
+function insertProperty(content: string, bounds: { open: number; close: number }, key: string, value: string): string {
   const { open, close } = bounds;
   const body = content.substring(open + 1, close);
   const lastComma = getLastTopLevelComma(content, open, close);
@@ -336,9 +343,7 @@ function insertProperty(
  * - Returns null on malformed input (caller skips the write).
  */
 export function rewriteJsoncSetting(content: string, key: string, value: string): string | null {
-  const re = new RegExp(
-    `(${makeKeyMatcher(key)}\\s*:\\s*)(?:"([^"]*)"|'([^']*)'|[^,}\\s][^,}]*?)`,
-  );
+  const re = new RegExp(`(${makeKeyMatcher(key)}\\s*:\\s*)(?:"([^"]*)"|'([^']*)'|[^,}\\s][^,}]*?)`);
   const m = content.match(re);
   if (m) {
     const current = m[2] ?? m[3] ?? m[4];

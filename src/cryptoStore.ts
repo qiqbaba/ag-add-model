@@ -1,5 +1,19 @@
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const { safeStorage } = require('electron');
+let safeStorage: {
+  isEncryptionAvailable: () => boolean;
+  encryptString: (text: string) => Buffer;
+  decryptString: (buffer: Buffer) => string;
+} | null = null;
+
+try {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const electron = require('electron');
+  if (electron && electron.safeStorage) {
+    safeStorage = electron.safeStorage;
+  }
+} catch (_e) {
+  // Safe fallback when running in Node.js test or CLI environment
+}
+
 import * as fs from 'fs';
 
 /**
@@ -84,7 +98,7 @@ export function decryptString(encryptedText: string): string {
   return encryptedText;
 }
 
-interface ModelWithKey {
+export interface ModelWithKey {
   apiKey?: string;
   encrypted?: boolean;
   provider?: string;
@@ -94,7 +108,7 @@ interface ModelWithKey {
 /**
  * Iterates through a list of custom models and encrypts their API keys.
  */
-export function encryptModels(models: ModelWithKey[] | null): ModelWithKey[] {
+export function encryptModels<T extends { apiKey?: string; encrypted?: boolean }>(models: T[] | null): T[] {
   if (!models || !Array.isArray(models)) return [];
   return models.map((model) => {
     if (model.apiKey && model.apiKey !== 'none' && !model.encrypted) {
@@ -104,14 +118,14 @@ export function encryptModels(models: ModelWithKey[] | null): ModelWithKey[] {
         encrypted: true,
       };
     }
-    return model;
+    return { ...model };
   });
 }
 
 /**
  * Iterates through a list of custom models and decrypts their API keys for in-memory use.
  */
-export function decryptModels(models: ModelWithKey[] | null): ModelWithKey[] {
+export function decryptModels<T extends { apiKey?: string; encrypted?: boolean }>(models: T[] | null): T[] {
   if (!models || !Array.isArray(models)) return [];
   return models.map((model) => {
     if (model.encrypted) {
@@ -121,6 +135,6 @@ export function decryptModels(models: ModelWithKey[] | null): ModelWithKey[] {
         encrypted: false,
       };
     }
-    return model;
+    return { ...model };
   });
 }

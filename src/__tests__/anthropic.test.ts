@@ -139,10 +139,7 @@ describe('mapGeminiToAnthropic', () => {
       contents: [
         {
           role: 'user',
-          parts: [
-            { text: 'Describe this image' },
-            { inlineData: { mimeType: 'image/png', data: 'AAAA' } },
-          ],
+          parts: [{ text: 'Describe this image' }, { inlineData: { mimeType: 'image/png', data: 'AAAA' } }],
         },
       ],
     };

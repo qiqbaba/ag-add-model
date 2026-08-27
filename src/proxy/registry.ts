@@ -151,12 +151,7 @@ export function translateResponse(
   return providerRes;
 }
 
-export function translateStreamChunk(
-  provider: string,
-  chunk: unknown,
-  modelName: string,
-  sessionId?: string,
-): unknown {
+export function translateStreamChunk(provider: string, chunk: unknown, modelName: string, sessionId?: string): unknown {
   const t = getTranslator(provider);
 
   if (provider === 'google')

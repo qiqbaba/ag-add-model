@@ -84,11 +84,7 @@ describe('buildCloudCodeUrl', () => {
 
 describe('resolveSettingsPath (cross-platform)', () => {
   it('resolves Windows %APPDATA% path', () => {
-    const p = resolveSettingsPath(
-      'win32',
-      { APPDATA: 'C:\\Users\\test\\AppData\\Roaming' },
-      'C:\\Users\\test',
-    );
+    const p = resolveSettingsPath('win32', { APPDATA: 'C:\\Users\\test\\AppData\\Roaming' }, 'C:\\Users\\test');
     expect(p).toBe(path.join('C:\\Users\\test\\AppData\\Roaming', 'Antigravity IDE', 'User', 'settings.json'));
   });
 
@@ -231,7 +227,7 @@ describe('syncSettingsJsonTo', () => {
   });
 });
 
-describe('getActivePortPath / syncActivePort', () => {
+describe('getActivePortPath / getDashboardUrlPath / syncActivePort', () => {
   beforeEach(() => {
     vi.mocked(os.homedir).mockReturnValue(fs.mkdtempSync(path.join(os.tmpdir(), 'agy-home-')));
   });
@@ -240,19 +236,21 @@ describe('getActivePortPath / syncActivePort', () => {
     vi.mocked(os.homedir).mockReturnValue(REAL_HOME);
   });
 
-  it('resolves to ~/.gemini/antigravity/active_port', () => {
-    expect(getActivePortPath()).toBe(
-      path.join(os.homedir(), '.gemini', 'antigravity', 'active_port'),
-    );
+  it('resolves to ~/.gemini/antigravity/active_port and dashboard_url', () => {
+    expect(getActivePortPath()).toBe(path.join(os.homedir(), '.gemini', 'antigravity', 'active_port'));
   });
 
-  it('writes and reads back the active port', () => {
+  it('writes and reads back the active port and dashboard_url', () => {
     const portPath = getActivePortPath();
+    const dashPath = path.join(os.homedir(), '.gemini', 'antigravity', 'dashboard_url');
     syncActivePort(54321);
     expect(fs.existsSync(portPath)).toBe(true);
     expect(fs.readFileSync(portPath, 'utf-8')).toBe('54321');
+    expect(fs.existsSync(dashPath)).toBe(true);
+    expect(fs.readFileSync(dashPath, 'utf-8')).toBe('http://127.0.0.1:54321/');
 
     syncActivePort(50999);
     expect(fs.readFileSync(portPath, 'utf-8')).toBe('50999');
+    expect(fs.readFileSync(dashPath, 'utf-8')).toBe('http://127.0.0.1:50999/');
   });
 });

@@ -94,7 +94,9 @@ npx tsc
 
 ## 配置
 
-模型存储在用户主目录的 `~/.gemini/antigravity/custom_models.json`。可通过设置中的**“添加模型”**弹窗轻松添加，也可直接编辑该 JSON 文件。
+模型存储在用户主目录的 `~/.gemini/antigravity/custom_models.json`。
+
+你可以通过代理服务内置的**可视化配置与连通性测试面板**（访问 `http://127.0.0.1:50999/`）以图形化界面轻松添加、测试连通性、编辑与管理模型，也可直接编辑该 JSON 文件。
 
 以下是一个**同时配置所有提供商多个模型**的 `custom_models.json` 完整示例：
 
@@ -270,6 +272,18 @@ Antigravity IDE 自动更新会覆盖已注入的文件（`out\main.js`、`out\p
 ---
 
 ## 故障排查
+
+### Web 配置面板打不开 / 返回 Google 404
+浏览器访问 `http://127.0.0.1:50999/` 显示 **Google 官网风格的 404 页**（而非自检面板），说明 IDE 内运行的代理是**旧构建**（早于 Web 面板特性，缺少 `dashboardHtml.js` / `connectionTest.js` / `modelConfigManager.js`，其 `proxy.js` 没有 `/` 面板路由，导致 `/` 被透传到 Google 官方端点而 404）。
+
+**解决**：重新部署一次即可恢复：
+
+```powershell
+.\deploy-ide.ps1 -IdePath "C:\Users\<User>\AppData\Local\Programs\Antigravity IDE"
+```
+
+> [!TIP]
+> 修改代理源码（`src/proxy.ts`、`src/proxy/dashboardHtml.ts` 等）或 IDE 自动更新覆盖 `out\proxy\` 后，**必须重跑 `deploy-ide.ps1`**。只用 `curl http://127.0.0.1:50999/` 验证：返回 HTTP 200 与 `<!DOCTYPE html>` 即正常。详见 [ARCHITECTURE.md](./ARCHITECTURE.md) 坑 11。
 
 ### 端口冲突
 若端口 `50999` 被占用，代理自动回退到随机端口，并**自动同步**：

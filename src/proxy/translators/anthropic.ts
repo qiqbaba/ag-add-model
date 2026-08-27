@@ -259,7 +259,9 @@ export function mapGeminiToAnthropic(
           const parts = item.parts || [];
           const contentBlocks: AnthropicContentBlock[] = [];
           const textParts: string[] = [];
-          const hasImage = parts.some((p) => (p as any).inlineData && (p as any).inlineData.mimeType?.startsWith('image/'));
+          const hasImage = parts.some(
+            (p) => (p as any).inlineData && (p as any).inlineData.mimeType?.startsWith('image/'),
+          );
           for (const p of parts) {
             if (p.text) {
               textParts.push(p.text);
@@ -283,7 +285,10 @@ export function mapGeminiToAnthropic(
             } else if ((p as any).inlineData) {
               const id = (p as any).inlineData;
               if (id.mimeType && id.mimeType.startsWith('image/')) {
-                contentBlocks.push({ type: 'image', source: { type: 'base64', media_type: id.mimeType, data: id.data } });
+                contentBlocks.push({
+                  type: 'image',
+                  source: { type: 'base64', media_type: id.mimeType, data: id.data },
+                });
               } else {
                 const textContent = `[Inline data: ${id.mimeType}, length: ${(id.data || '').length} chars]`;
                 textParts.push(textContent);
@@ -291,11 +296,12 @@ export function mapGeminiToAnthropic(
               }
             }
           }
-          const content: string | AnthropicContentBlock[] = hasImage
-            ? contentBlocks
-            : textParts.join('\n');
+          const content: string | AnthropicContentBlock[] = hasImage ? contentBlocks : textParts.join('\n');
           if (roleStr === 'system') {
-            const sysContent = typeof content === 'string' ? content : (content as AnthropicContentBlock[]).map((b) => b.text || '').join('\n');
+            const sysContent =
+              typeof content === 'string'
+                ? content
+                : (content as AnthropicContentBlock[]).map((b) => b.text || '').join('\n');
             system = (system || '') + '\n' + sysContent;
           } else {
             messages.push({ role: roleStr as AnthropicMessageRole, content });

@@ -8,7 +8,6 @@ import * as http from 'http';
 import * as https from 'https';
 import * as fs from 'fs';
 import * as path from 'path';
-import { app } from 'electron';
 import log from 'electron-log';
 
 // ─── Types ────────────────────────────────────────────────────────────────
@@ -74,9 +73,40 @@ import * as registry from './proxy/registry';
 import { syncActivePort, syncSettingsJson } from './proxy/settingsSync';
 export { syncActivePort, syncSettingsJson, getSettingsPath, getActivePortPath } from './proxy/settingsSync';
 
-// Dynamic imports (stays require for Electron-specific modules)
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const cryptoStore = require('./cryptoStore');
+// Visual configuration dashboard & model management
+import { renderDashboardHtml } from './proxy/dashboardHtml';
+import {
+  getModelsViewModel,
+  saveCustomModel,
+  deleteCustomModel,
+  getRawConfig,
+  saveRawConfig,
+  getSystemInfo,
+  readDecryptedModels,
+  generateSlug,
+  getCustomModelsPath,
+  type ModelViewModel,
+} from './proxy/modelConfigManager';
+import { testModelConnection, type TestConnectionParams, type TestConnectionResult } from './proxy/connectionTest';
+
+export {
+  renderDashboardHtml,
+  getModelsViewModel,
+  saveCustomModel,
+  deleteCustomModel,
+  getRawConfig,
+  saveRawConfig,
+  getSystemInfo,
+  readDecryptedModels,
+  getCustomModelsPath,
+  testModelConnection,
+  type ModelViewModel,
+  type TestConnectionParams,
+  type TestConnectionResult,
+};
+
+import * as cryptoStore from './cryptoStore';
+import { validateCustomModel } from './schemaValidator';
 
 // ─── Model Helpers ────────────────────────────────────────────────────────
 
@@ -90,11 +120,6 @@ function generateModelPlaceholderId(model: CustomModel): string {
   }
   const placeholderNum = 400 + (Math.abs(hash) % 200);
   return `MODEL_PLACEHOLDER_M${placeholderNum}`;
-}
-
-function getCustomModelsPath(): string {
-  const geminiDir = path.join(app.getPath('home'), '.gemini', 'antigravity');
-  return path.join(geminiDir, 'custom_models.json');
 }
 
 function toSlug(model: CustomModel): string {
@@ -153,8 +178,6 @@ function assignUniqueSlugsAndPlaceholders(models: CustomModel[]): CustomModel[] 
 
 function loadCustomModels(): CustomModel[] {
   const filePath = getCustomModelsPath();
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { validateCustomModel } = require('./schemaValidator');
 
   if (!fs.existsSync(filePath)) {
     const defaultModels = {
@@ -192,12 +215,14 @@ function loadCustomModels(): CustomModel[] {
       (defaultModels.models as CustomModel[]).forEach((m) => {
         (m as unknown as Record<string, unknown>).encrypted = false;
       });
-      const encrypted = cryptoStore.encryptModels(defaultModels.models);
+      const encrypted = cryptoStore.encryptModels<CustomModel>(defaultModels.models as CustomModel[]);
       fs.writeFileSync(filePath, JSON.stringify({ models: encrypted }, null, 2), 'utf-8');
     } catch (e) {
       log.error('[Proxy] Failed to write default custom_models.json', e);
     }
-    return assignUniqueSlugsAndPlaceholders(cryptoStore.decryptModels(defaultModels.models));
+    return assignUniqueSlugsAndPlaceholders(
+      cryptoStore.decryptModels<CustomModel>(defaultModels.models as CustomModel[]),
+    );
   }
 
   try {
@@ -217,17 +242,17 @@ function loadCustomModels(): CustomModel[] {
     if (needsMigration) {
       log.info('[Proxy] Plaintext custom_models.json detected. Migrating to encrypted format...');
       cryptoStore.backupFile(filePath);
-      const encryptedModels = cryptoStore.encryptModels(models);
+      const encryptedModels = cryptoStore.encryptModels<CustomModel>(models);
       try {
         fs.writeFileSync(filePath, JSON.stringify({ models: encryptedModels }, null, 2), 'utf-8');
         log.info('[Proxy] Successfully migrated custom_models.json to encrypted format.');
-        return assignUniqueSlugsAndPlaceholders(cryptoStore.decryptModels(encryptedModels));
+        return assignUniqueSlugsAndPlaceholders(cryptoStore.decryptModels<CustomModel>(encryptedModels));
       } catch (err) {
         log.error('[Proxy] Failed to write encrypted custom_models.json during migration:', err);
       }
     }
 
-    const decrypted = cryptoStore.decryptModels(models) as CustomModel[];
+    const decrypted = cryptoStore.decryptModels<CustomModel>(models);
 
     // Validate all models
     const validModels: CustomModel[] = [];
@@ -619,7 +644,10 @@ function handleCustomModelRequest(
           log.warn(
             `[Proxy] Server error ${apiRes.statusCode} for ${model.name}, retrying in ${delay}ms (${retryCount + 1}/${MAX_RETRIES})...`,
           );
-          setTimeout(() => handleCustomModelRequest(res, model, geminiBody, isStream, sessionId, retryCount + 1), delay);
+          setTimeout(
+            () => handleCustomModelRequest(res, model, geminiBody, isStream, sessionId, retryCount + 1),
+            delay,
+          );
           return;
         }
 
@@ -630,7 +658,10 @@ function handleCustomModelRequest(
           log.warn(
             `[Proxy] Rate limited (429) for ${model.name}, retrying in ${delay}ms (${retryCount + 1}/${MAX_RETRIES})...`,
           );
-          setTimeout(() => handleCustomModelRequest(res, model, geminiBody, isStream, sessionId, retryCount + 1), delay);
+          setTimeout(
+            () => handleCustomModelRequest(res, model, geminiBody, isStream, sessionId, retryCount + 1),
+            delay,
+          );
           return;
         }
 
@@ -1069,6 +1100,151 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
 
     log.info(`[Proxy] Request: ${req.method} ${req.url}`);
 
+    const parsedReqUrl = new URL(req.url || '/', 'http://127.0.0.1');
+    const reqPathname = parsedReqUrl.pathname;
+
+    // ─── Web Dashboard & RESTful Management API ───────────────────────────
+    if (
+      req.method === 'GET' &&
+      (reqPathname === '/' || reqPathname === '/dashboard' || reqPathname === '/ui' || reqPathname === '/index.html')
+    ) {
+      const html = renderDashboardHtml();
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Content-Length': Buffer.byteLength(html, 'utf-8'),
+      });
+      res.end(html);
+      return;
+    }
+
+    if (req.method === 'GET' && reqPathname === '/favicon.ico') {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    if (req.method === 'GET' && reqPathname === '/api/status') {
+      const info = getSystemInfo(proxyPort);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(info));
+      return;
+    }
+
+    if (req.method === 'GET' && reqPathname.startsWith('/api/models')) {
+      if (reqPathname === '/api/models/raw') {
+        const rawJson = getRawConfig();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(rawJson);
+        return;
+      }
+      const includeKeys = parsedReqUrl.searchParams.get('includeKeys') === 'true';
+      const models = getModelsViewModel(includeKeys);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(models));
+      return;
+    }
+
+    if (req.method === 'POST' && reqPathname === '/api/models') {
+      try {
+        const modelData = JSON.parse(bodyStr) as Partial<CustomModel>;
+        const result = saveCustomModel(modelData);
+        if (result.success) {
+          log.info(`[Proxy] Custom model "${modelData.name}" saved successfully`);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } else {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        }
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: (err as Error).message }));
+      }
+      return;
+    }
+
+    if (req.method === 'DELETE' && reqPathname.startsWith('/api/models')) {
+      try {
+        let targetName = '';
+        if (bodyStr && bodyStr.trim().length > 0) {
+          try {
+            const bodyJson = JSON.parse(bodyStr) as { name?: string };
+            targetName = bodyJson.name || '';
+          } catch (_e) {
+            // body is not json
+          }
+        }
+        if (!targetName) {
+          targetName = parsedReqUrl.searchParams.get('name') || '';
+          if (!targetName && reqPathname.startsWith('/api/models/')) {
+            targetName = decodeURIComponent(reqPathname.slice('/api/models/'.length));
+          }
+        }
+        if (!targetName) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'Missing model name to delete' }));
+          return;
+        }
+        const result = deleteCustomModel(targetName);
+        if (result.success) {
+          log.info(`[Proxy] Custom model "${targetName}" deleted successfully`);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } else {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        }
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: (err as Error).message }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && reqPathname === '/api/models/test') {
+      try {
+        const testParams = JSON.parse(bodyStr) as Partial<TestConnectionParams>;
+        if (testParams.name && (!testParams.apiKey || testParams.apiKey.includes('••••'))) {
+          const existingModels = readDecryptedModels();
+          const found = existingModels.find((m) => m.name === testParams.name || generateSlug(m) === testParams.name);
+          if (found) {
+            testParams.provider = testParams.provider || found.provider;
+            testParams.apiUrl = testParams.apiUrl || found.apiUrl;
+            testParams.apiKey = found.apiKey;
+            testParams.externalModelName = testParams.externalModelName || found.externalModelName;
+            testParams.allowUnauthorized =
+              testParams.allowUnauthorized !== undefined ? testParams.allowUnauthorized : found.allowUnauthorized;
+          }
+        }
+        testModelConnection(testParams as TestConnectionParams)
+          .then((testResult) => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(testResult));
+          })
+          .catch((err) => {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: (err as Error).message }));
+          });
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: 'Invalid JSON body: ' + (err as Error).message }));
+      }
+      return;
+    }
+
+    if (req.method === 'PUT' && reqPathname === '/api/models/raw') {
+      const result = saveRawConfig(bodyStr);
+      if (result.success) {
+        log.info(`[Proxy] Raw custom_models.json updated successfully (${result.count} models)`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } else {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      }
+      return;
+    }
+
     // 0. Intercept GetAvailableModels (redirected from Electron webRequest)
     if (req.url!.startsWith('/GetAvailableModels')) {
       const gavParsed = new URL(req.url!, 'http://127.0.0.1');
@@ -1318,7 +1494,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
 
             // TEMP DEBUG: dump merged response for structure inspection
             try {
-              const debugDir = path.join(app.getPath('home'), '.gemini', 'antigravity');
+              const debugDir = path.dirname(getCustomModelsPath());
               fs.mkdirSync(debugDir, { recursive: true });
               fs.writeFileSync(
                 path.join(debugDir, 'debug_fetchAvailableModels.json'),

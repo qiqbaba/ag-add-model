@@ -7,7 +7,8 @@ param(
     [string]$IdePath = "C:\Users\21855\AppData\Local\Programs\Antigravity IDE",
     [switch]$SkipBuild,
     [switch]$SkipBinaryPatch,
-    [switch]$SkipLaunch
+    [switch]$SkipLaunch,
+    [switch]$OpenDashboard
 )
 
 $ErrorActionPreference = "Stop"
@@ -299,10 +300,19 @@ if (-not $SkipLaunch) {
             Write-Host "============================================" -ForegroundColor Cyan
             Write-Host " 部署成功! 代理运行于 http://127.0.0.1:$p" -ForegroundColor Green
             Write-Host " 健康检查: $($health.StatusCode)" -ForegroundColor Green
+            Write-Host " -> 可视化模型配置与连通性测试面板: http://127.0.0.1:$p/" -ForegroundColor Yellow
             Write-Host "============================================" -ForegroundColor Cyan
+            if ($OpenDashboard) {
+                Write-Host "   正在打开可视化配置面板..." -ForegroundColor Gray
+                Start-Process "http://127.0.0.1:$p/"
+            }
         } catch { Write-Host "代理健康检查失败, 请查看日志" -ForegroundColor Red }
     } else { Write-Host "active_port 未生成, 请查看日志排查" -ForegroundColor Red }
+} else {
+    Write-Host ""
+    Write-Host "提示: 启动 Antigravity IDE 后, 访问可视化面板: http://127.0.0.1:50999/" -ForegroundColor Cyan
 }
 Write-Host ""
+Write-Host "面板: http://127.0.0.1:50999/ (或查阅 %USERPROFILE%\.gemini\antigravity\active_port)" -ForegroundColor Gray
 Write-Host "日志: %APPDATA%\Antigravity IDE\logs\main.log" -ForegroundColor Gray
 Write-Host "回滚: $BackupDir\rollback.ps1" -ForegroundColor Gray
