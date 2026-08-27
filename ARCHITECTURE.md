@@ -544,14 +544,22 @@ OpenAI 兼容自定义模型（`openai` / `custom` / `openrouter` / `ollama` 等
 
 ---
 
-### 5.3 一键回滚操作
+### 5.3 便捷切换与一键回滚
 
-若需恢复官方纯净状态，关闭 IDE 后在 PowerShell 中执行备份目录下的回滚脚本即可：
+#### 1. 一键开启 / 暂停代理（无需卸载，即时生效）
+若仅需临时停用代理并切回 Google 官方纯净原生模式（或重新开启），运行：
+```powershell
+.\toggle-proxy.ps1                  # 自动切换状态
+.\toggle-proxy.ps1 -Action Disable   # 暂停代理
+.\toggle-proxy.ps1 -Action Enable    # 开启代理
+```
+*(或直接双击根目录下的 `toggle-proxy.bat`)*
 
+#### 2. 一键彻底卸载回滚（恢复纯净官方文件）
+若需彻底清理代理注入并恢复所有原版文件，执行：
 ```powershell
 & "$env:LOCALAPPDATA\Programs\Antigravity IDE\resources\app_backup\rollback.ps1"
 ```
-
 该脚本将自动还原 `main.js` 与语言服务器二进制文件，并清理 `out\proxy` 注入目录。随后只需手动删除 `settings.json` 中的 `jetski.cloudCodeUrl` 项。
 
 ---

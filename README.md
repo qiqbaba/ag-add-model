@@ -43,6 +43,22 @@
 > [!TIP]
 > IDE 采用解包式 `resources\app\` 布局（无 `app.asar`）。语言服务器的云端端点由 **`jetski.cloudCodeUrl`** 用户设置驱动，它会覆盖二进制内的硬编码 URL — 因此写入该设置是关键步骤。完整技术实现与 10 个已知坑见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
 
+### 一键开启 / 暂停代理（日常便捷切换）
+
+如果需要临时停用代理并切回 100% 官方原生模式（或重新开启）：
+
+```powershell
+# 自动切换状态（开启 -> 暂停 / 暂停 -> 开启）
+.\toggle-proxy.ps1
+
+# 或强制指定动作
+.\toggle-proxy.ps1 -Action Disable   # 暂停代理（恢复纯官方模式）
+.\toggle-proxy.ps1 -Action Enable    # 开启代理
+.\toggle-proxy.ps1 -Action Status    # 查看当前状态
+```
+
+> **提示**：在 Windows 资源管理器中，也可以直接**双击运行 `toggle-proxy.bat`** 实现一键切换！
+
 ### 从源码构建（TypeScript）
 
 ```bash
