@@ -1,6 +1,7 @@
 /**
  * Unit tests for shared translator utilities (utils.ts).
  */
+import * as path from 'path';
 import { describe, it, expect } from 'vitest';
 import {
   fixParamTypes,
@@ -150,13 +151,22 @@ describe('translateToolCallToNative', () => {
     expect(result).toEqual({ name: 'view_file', args: { AbsolutePath: '/x.ts' } });
   });
 
-  it('should translate ls to list_dir', () => {
+  it('should translate ls to list_dir with POSIX absolute path', () => {
     const result = translateToolCallToNative('run_command', {
       CommandLine: 'ls /home/user',
       Cwd: '/tmp',
     });
     expect(result.name).toBe('list_dir');
-    expect(result.args).toHaveProperty('DirectoryPath');
+    expect(result.args).toEqual({ DirectoryPath: '/home/user' });
+  });
+
+  it('should translate ls with flags to list_dir with target directory', () => {
+    const result = translateToolCallToNative('run_command', {
+      CommandLine: 'ls -la /var/log',
+      Cwd: '/tmp',
+    });
+    expect(result.name).toBe('list_dir');
+    expect(result.args).toEqual({ DirectoryPath: '/var/log' });
   });
 
   it('should translate dir to list_dir (Windows)', () => {
@@ -165,6 +175,16 @@ describe('translateToolCallToNative', () => {
       Cwd: 'C:\\project',
     });
     expect(result.name).toBe('list_dir');
+    expect(result.args).toEqual({ DirectoryPath: path.resolve('C:\\project', 'src') });
+  });
+
+  it('should translate dir with Windows flags to list_dir', () => {
+    const result = translateToolCallToNative('run_command', {
+      CommandLine: 'dir /s /b /a:d src',
+      Cwd: 'C:\\project',
+    });
+    expect(result.name).toBe('list_dir');
+    expect(result.args).toEqual({ DirectoryPath: path.resolve('C:\\project', 'src') });
   });
 
   it('should translate cat to view_file', () => {
@@ -173,7 +193,7 @@ describe('translateToolCallToNative', () => {
       Cwd: '/',
     });
     expect(result.name).toBe('view_file');
-    expect(result.args).toHaveProperty('AbsolutePath');
+    expect(result.args).toEqual({ AbsolutePath: '/etc/hosts' });
   });
 
   it('should translate type to view_file (Windows)', () => {
@@ -182,6 +202,7 @@ describe('translateToolCallToNative', () => {
       Cwd: 'C:\\',
     });
     expect(result.name).toBe('view_file');
+    expect(result.args).toEqual({ AbsolutePath: 'C:\\file.txt' });
   });
 
   it('should translate echo redirect to write_file', () => {
@@ -190,17 +211,22 @@ describe('translateToolCallToNative', () => {
       Cwd: '/',
     });
     expect(result.name).toBe('write_file');
-    expect(result.args).toHaveProperty('AbsolutePath');
+    expect(result.args).toEqual({ AbsolutePath: '/tmp/out.txt', Content: 'hello', Append: false });
   });
 
-  it('should translate grep to grep_search', () => {
+  it('should translate grep to grep_search with POSIX path', () => {
     const result = translateToolCallToNative('run_command', {
       CommandLine: 'grep -i "TODO" /src',
       Cwd: '/',
     });
     expect(result.name).toBe('grep_search');
-    expect(result.args).toHaveProperty('Query', 'TODO');
-    expect(result.args).toHaveProperty('CaseInsensitive', true);
+    expect(result.args).toEqual({
+      Query: 'TODO',
+      SearchPath: '/src',
+      CaseInsensitive: true,
+      IsRegex: false,
+      MatchPerLine: true,
+    });
   });
 
   it('should handle findstr (Windows grep)', () => {
@@ -209,7 +235,13 @@ describe('translateToolCallToNative', () => {
       Cwd: 'C:\\src',
     });
     expect(result.name).toBe('grep_search');
-    expect(result.args).toHaveProperty('CaseInsensitive', true);
+    expect(result.args).toEqual({
+      Query: 'TODO',
+      SearchPath: path.resolve('C:\\src', '*.ts'),
+      CaseInsensitive: true,
+      IsRegex: false,
+      MatchPerLine: true,
+    });
   });
 
   it('should pass through unknown commands', () => {

@@ -415,6 +415,19 @@ export function fixParamTypes(properties: Record<string, unknown> | undefined): 
 }
 
 /**
+ * Determines whether a command-line token represents an option/flag rather than a file/directory path.
+ * In POSIX tools (ls, grep), options start with '-' or '--'.
+ * In Windows CLI tools (dir, findstr), options may additionally start with '/' followed by short flag names (e.g., /s, /b, /a:d, /i).
+ */
+function isOptionFlag(token: string, isWindowsCmd: boolean): boolean {
+  if (token.startsWith('-')) return true;
+  if (isWindowsCmd && /^\/[a-zA-Z](:[^/\\]*)?$/.test(token)) {
+    return true;
+  }
+  return false;
+}
+
+/**
  * Translates generic shell/terminal commands (run_command) into native Antigravity file tools.
  */
 export function translateToolCallToNative(name: string, args: ToolCallArgs): TranslatedToolCall {
@@ -426,13 +439,15 @@ export function translateToolCallToNative(name: string, args: ToolCallArgs): Tra
   const cwd = args.Cwd || process.cwd();
 
   // 1. list_dir translation
-  const isListDir = /^(ls|dir)(\s+[\w\-\/\.\*]+)*$/i.test(cmd);
+  const isListDir = /^(ls|dir)\b/i.test(cmd);
   if (isListDir) {
+    const isDirCmd = /^dir\b/i.test(cmd);
     let dirPath = cwd;
     const tokens = cmd.split(/\s+/).slice(1);
-    const pathToken = tokens.find((t) => !t.startsWith('-') && !t.startsWith('/'));
+    const pathToken = tokens.find((t) => !isOptionFlag(t, isDirCmd));
     if (pathToken) {
-      dirPath = path.isAbsolute(pathToken) ? pathToken : path.resolve(cwd, pathToken);
+      const cleanPath = pathToken.replace(/^["']|["']$/g, '');
+      dirPath = path.isAbsolute(cleanPath) ? cleanPath : path.resolve(cwd, cleanPath);
     }
     log.info(`[Proxy] Translating run_command "${cmd}" to list_dir on "${dirPath}"`);
     return { name: 'list_dir', args: { DirectoryPath: dirPath } };
@@ -459,23 +474,23 @@ export function translateToolCallToNative(name: string, args: ToolCallArgs): Tra
 
   // 3. grep_search translation
   if (cmd.toLowerCase().startsWith('grep') || cmd.toLowerCase().startsWith('findstr')) {
+    const isFindstr = /^findstr\b/i.test(cmd);
     let query = '';
     let searchPath = cwd;
     const regexQuotes = /"([^"]+)"|'([^']+)'/g;
     const quotesFound = [...cmd.matchAll(regexQuotes)];
     if (quotesFound.length > 0) {
       query = quotesFound[0][1] || quotesFound[0][2];
-    } else {
-      const tokens = cmd.split(/\s+/);
-      query = tokens[tokens.length - 1];
     }
     const tokens = cmd.split(/\s+/);
-    const pathToken = tokens.find(
-      (t, idx) =>
-        idx > 0 && !t.startsWith('-') && !t.startsWith('/') && !t.includes('"') && !t.includes("'") && t !== query,
-    );
+    const nonOptionTokens = tokens.slice(1).filter((t) => !isOptionFlag(t, isFindstr));
+    if (!query && nonOptionTokens.length > 0) {
+      query = nonOptionTokens[0].replace(/^["']|["']$/g, '');
+    }
+    const pathToken = nonOptionTokens.find((t) => t !== query && t.replace(/^["']|["']$/g, '') !== query);
     if (pathToken) {
-      searchPath = path.isAbsolute(pathToken) ? pathToken : path.resolve(cwd, pathToken);
+      const cleanPath = pathToken.replace(/^["']|["']$/g, '');
+      searchPath = path.isAbsolute(cleanPath) ? cleanPath : path.resolve(cwd, cleanPath);
     }
     if (query) {
       log.info(`[Proxy] Translating run_command "${cmd}" to grep_search (Query: "${query}", Path: "${searchPath}")`);
