@@ -265,6 +265,77 @@ describe('mapOpenAIToGemini', () => {
     expect(shared.translatedToolCalls.get(id)?.translatedName).toBe('list_dir');
   });
 
+  it('should scope tool-call state per sessionId (concurrent sessions are isolated)', () => {
+    const resA = {
+      choices: [
+        {
+          message: {
+            tool_calls: [
+              { id: 'call_a', type: 'function' as const, function: { name: 'run_command', arguments: '{"CommandLine":"ls","Cwd":"/repo"}' } },
+            ],
+          },
+          finish_reason: 'tool_calls',
+        },
+      ],
+      usage: { prompt_tokens: 5, completion_tokens: 10, total_tokens: 15 },
+    };
+    const resB = {
+      choices: [
+        {
+          message: {
+            tool_calls: [
+              { id: 'call_b', type: 'function' as const, function: { name: 'run_command', arguments: '{"CommandLine":"ls","Cwd":"/repo2"}' } },
+            ],
+          },
+          finish_reason: 'tool_calls',
+        },
+      ],
+      usage: { prompt_tokens: 5, completion_tokens: 10, total_tokens: 15 },
+    };
+    // Same model (deepseek-v4) used by TWO concurrent sessions.
+    mapOpenAIToGemini(resA, 'deepseek-v4', 'conv-a');
+    mapOpenAIToGemini(resB, 'deepseek-v4', 'conv-b');
+    // Each session's tool_call_id is stored under its own composite key, so the
+    // later request cannot overwrite the earlier session's mapping.
+    expect(shared.modelToolCallIds.get('deepseek-v4|conv-a')?.['run_command']).toBe('call_a');
+    expect(shared.modelToolCallIds.get('deepseek-v4|conv-b')?.['run_command']).toBe('call_b');
+    // The unsplit model-name key no longer aggregates across sessions.
+    expect(shared.modelToolCallIds.get('deepseek-v4')?.run_command).toBeUndefined();
+  });
+
+  it('should resolve functionResponse tool_call_id from in-request history when id is missing', () => {
+    // Turn 1 response: model emits a translated tool call
+    const response = mapOpenAIToGemini(
+      {
+        choices: [
+          {
+            message: {
+              content:
+                '<DSML|invoke name="run_command">\n<DSML|parameter name="CommandLine" string="true">ls</DSML|parameter>\n</DSML|invoke>',
+            },
+            finish_reason: 'stop',
+          },
+        ],
+      },
+      'deepseek-v4',
+    );
+    const fc = response.candidates[0].content.parts.find((p) => p.functionCall)!.functionCall!;
+    // Turn 2 request: the client sends back a functionResponse WITHOUT an id, in the
+    // same request as the assistant's functionCall (as Gemini history does).
+    const request = mapGeminiToOpenAI(
+      {
+        contents: [
+          { role: 'model', parts: [{ functionCall: { name: fc.name, args: fc.args, id: fc.id } }] },
+          { role: 'user', parts: [{ functionResponse: { name: fc.name, response: 'ls output' } }] },
+        ],
+      },
+      'deepseek-v4',
+      'conv-a',
+    );
+    const toolMsg = request.messages.find((m) => m.role === 'tool')!;
+    expect(toolMsg.tool_call_id).toBe(fc.id);
+  });
+
   it('should preserve reasoning_content alongside tool_calls', () => {
     const res = {
       choices: [

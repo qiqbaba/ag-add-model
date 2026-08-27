@@ -59,6 +59,7 @@ import {
   translatedToolCalls,
   stateTimestamps,
   touchStateTimestamp,
+  stateKey,
   startCleanupInterval,
   stopCleanupInterval,
 } from './proxy/shared';
@@ -98,13 +99,11 @@ function getCustomModelsPath(): string {
 
 function toSlug(model: CustomModel): string {
   if (model._slug) return model._slug;
-  // Tier keywords (flash/pro/low/medium/high/tier/lite) in model IDs pollute the
-  // LS tier-family grouping and break the official Low/Medium/High submenu.
-  // Substitute them so injected IDs never match tier patterns. `flash` is
-  // rewritten to `flsh` then to `fx` so the sanitized form itself never
-  // matches tier detection either.
   // Prioritize displayName so models targeting the same upstream model id
-  // (e.g. deepseek-v4-flash from different providers) generate distinct, descriptive slugs.
+  // (e.g. deepseek-v4-flash from different providers) generate distinct,
+  // descriptive slugs. Display names are preserved verbatim: tier-family safety
+  // is guaranteed by the complete model metadata (thinkingLevel: 0 + full field
+  // set) injected in fetchAvailableModels, not by mutating the name keywords.
   const rawName = model.displayName || model.externalModelName || model.name || 'custom-model';
   return (
     'extm-' +
@@ -113,14 +112,6 @@ function toSlug(model: CustomModel): string {
       .replace(/[^a-zA-Z0-9]+/g, '-')
       .replace(/^-+|-+$/g, '')
       .toLowerCase()
-      .replace(/flash/g, 'flsh')
-      .replace(/flsh/g, 'fx')
-      .replace(/lite/g, 'lt')
-      .replace(/tier/g, 'tter')
-      .replace(/low/g, 'l0w')
-      .replace(/medium/g, 'med1um')
-      .replace(/high/g, 'h1gh')
-      .replace(/pro/g, 'pr0')
   );
 }
 
@@ -156,26 +147,6 @@ function assignUniqueSlugsAndPlaceholders(models: CustomModel[]): CustomModel[] 
   }
 
   return models;
-}
-
-/**
- * Strips LS tier-family keywords from a custom model's display name.
- * The LS frontend matches tier families (flash/lite/low/medium/high/pro) on
- * BOTH the model id and the display name; a custom model whose friendly name
- * contains one of these keywords gets misclassified as a tiered model and then
- * hidden from the picker. Mirror `toSlug` substitutions so injected names never
- * match tier patterns.
- */
-function sanitizeDisplayName(name: string): string {
-  return (name || '')
-    .replace(/flash/gi, 'flsh')
-    .replace(/flsh/gi, 'fx')
-    .replace(/lite/gi, 'lt')
-    .replace(/tier/gi, 'tter')
-    .replace(/low/gi, 'l0w')
-    .replace(/medium/gi, 'med1um')
-    .replace(/high/gi, 'h1gh')
-    .replace(/pro/gi, 'pr0');
 }
 
 // ─── Model Loading ────────────────────────────────────────────────────────
@@ -472,6 +443,7 @@ function handleCustomModelRequest(
   model: CustomModel,
   geminiBody: GeminiRequestBody,
   isStream: boolean,
+  sessionId?: string,
   retryCount = 0,
 ): void {
   // P3-18: Configurable max retries per model (default 3, min 0, max 5)
@@ -480,7 +452,7 @@ function handleCustomModelRequest(
 
   const provider = model.provider === 'custom' || model.provider === 'openrouter' ? 'openai' : model.provider;
 
-  const payload = registry.translateRequest(provider, geminiBody, model.externalModelName);
+  const payload = registry.translateRequest(provider, geminiBody, model.externalModelName, sessionId);
   const headers = registry.getProviderHeaders(provider, model.apiKey);
 
   if (isStream && registry.supportsStreaming(provider)) {
@@ -549,7 +521,7 @@ function handleCustomModelRequest(
           if (retryCount < MAX_RETRIES) {
             log.warn(`[Proxy] Stream error, retrying (${retryCount + 1}/${MAX_RETRIES})...`);
             setTimeout(
-              () => handleCustomModelRequest(res, model, geminiBody, isStream, retryCount + 1),
+              () => handleCustomModelRequest(res, model, geminiBody, isStream, sessionId, retryCount + 1),
               1000 * (retryCount + 1),
             );
             return;
@@ -581,7 +553,7 @@ function handleCustomModelRequest(
             if (dataStr === '[DONE]') continue;
             try {
               const parsed = JSON.parse(dataStr);
-              const mapped = registry.translateStreamChunk(provider, parsed, model.name);
+              const mapped = registry.translateStreamChunk(provider, parsed, model.name, sessionId);
 
               if (mapped) {
                 const cloudCodeResponse = {
@@ -605,7 +577,7 @@ function handleCustomModelRequest(
           if (dataStr !== '[DONE]') {
             try {
               const parsed = JSON.parse(dataStr);
-              const mapped = registry.translateStreamChunk(provider, parsed, model.name);
+              const mapped = registry.translateStreamChunk(provider, parsed, model.name, sessionId);
               if (mapped) {
                 const cloudCodeResponse = {
                   response: { candidates: [mapped] },
@@ -647,7 +619,7 @@ function handleCustomModelRequest(
           log.warn(
             `[Proxy] Server error ${apiRes.statusCode} for ${model.name}, retrying in ${delay}ms (${retryCount + 1}/${MAX_RETRIES})...`,
           );
-          setTimeout(() => handleCustomModelRequest(res, model, geminiBody, isStream, retryCount + 1), delay);
+          setTimeout(() => handleCustomModelRequest(res, model, geminiBody, isStream, sessionId, retryCount + 1), delay);
           return;
         }
 
@@ -658,7 +630,7 @@ function handleCustomModelRequest(
           log.warn(
             `[Proxy] Rate limited (429) for ${model.name}, retrying in ${delay}ms (${retryCount + 1}/${MAX_RETRIES})...`,
           );
-          setTimeout(() => handleCustomModelRequest(res, model, geminiBody, isStream, retryCount + 1), delay);
+          setTimeout(() => handleCustomModelRequest(res, model, geminiBody, isStream, sessionId, retryCount + 1), delay);
           return;
         }
 
@@ -679,13 +651,14 @@ function handleCustomModelRequest(
             (parsed as { choices?: { message?: { reasoning_content?: string; reasoning?: string } }[] }).choices?.[0]
               ?.message?.reasoning;
           if (reasoning) {
-            modelReasoningContent.set(model.name, reasoning);
-            touchStateTimestamp(stateTimestamps.reasoning, model.name);
+            const reasonKey = stateKey(model.name, sessionId);
+            modelReasoningContent.set(reasonKey, reasoning);
+            touchStateTimestamp(stateTimestamps.reasoning, reasonKey);
           }
 
           const providerForResponse =
             model.provider === 'custom' || model.provider === 'openrouter' ? 'openai' : model.provider;
-          const mapped = registry.translateResponse(providerForResponse, parsed, model.name);
+          const mapped = registry.translateResponse(providerForResponse, parsed, model.name, sessionId);
 
           const cloudCodeResponse = {
             response: mapped,
@@ -701,7 +674,7 @@ function handleCustomModelRequest(
           if (retryCount < MAX_RETRIES) {
             log.warn(`[Proxy] Parse error for ${model.name}, retrying (${retryCount + 1}/${MAX_RETRIES})...`);
             setTimeout(
-              () => handleCustomModelRequest(res, model, geminiBody, isStream, retryCount + 1),
+              () => handleCustomModelRequest(res, model, geminiBody, isStream, sessionId, retryCount + 1),
               1000 * (retryCount + 1),
             );
             return;
@@ -721,7 +694,7 @@ function handleCustomModelRequest(
     if (retryCount < MAX_RETRIES) {
       log.warn(`[Proxy] Timeout for ${model.name}, retrying (${retryCount + 1}/${MAX_RETRIES})...`);
       setTimeout(
-        () => handleCustomModelRequest(res, model, geminiBody, isStream, retryCount + 1),
+        () => handleCustomModelRequest(res, model, geminiBody, isStream, sessionId, retryCount + 1),
         1000 * (retryCount + 1),
       );
       return;
@@ -739,7 +712,7 @@ function handleCustomModelRequest(
     if (retryCount < MAX_RETRIES) {
       log.warn(`[Proxy] Network error for ${model.name}, retrying (${retryCount + 1}/${MAX_RETRIES})...`);
       setTimeout(
-        () => handleCustomModelRequest(res, model, geminiBody, isStream, retryCount + 1),
+        () => handleCustomModelRequest(res, model, geminiBody, isStream, sessionId, retryCount + 1),
         1000 * (retryCount + 1),
       );
       return;
@@ -1139,7 +1112,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
             customModels.forEach((m) => {
               const slug = toSlug(m);
               mappedCustom[slug] = {
-                displayName: sanitizeDisplayName(m.displayName),
+                displayName: m.displayName,
                 name: slug,
                 maxTokens: 1048576,
                 maxOutputTokens: 4096,
@@ -1174,7 +1147,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
                   return {
                     name: 'models/' + generateModelPlaceholderId(m),
                     version: '1.0',
-                    displayName: sanitizeDisplayName(m.displayName),
+                    displayName: m.displayName,
                     description: m.description,
                     inputTokenLimit: cap.maxTokens,
                     outputTokenLimit: cap.maxOutputTokens,
@@ -1196,7 +1169,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
                   const slug = m._slug || toSlug(m);
                   const cap = detectModelCapabilities(m, true);
                   const entry: Record<string, unknown> = {
-                    displayName: sanitizeDisplayName(m.displayName),
+                    displayName: m.displayName,
                     supportsImages: cap.supportsImages,
                     supportsThinking: cap.isThinking,
                     thinkingBudget: cap.isThinking ? 4096 : 0,
@@ -1308,7 +1281,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
               customModels.forEach((m) => {
                 const slug = m._slug || toSlug(m);
                 modelsMap[slug] = {
-                  displayName: sanitizeDisplayName(m.displayName),
+                  displayName: m.displayName,
                   name: slug,
                   recommended: true,
                   maxTokens: 1048576,
@@ -1377,7 +1350,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
             customModels.forEach((m) => {
               const slug = toSlug(m);
               mappedCustom[slug] = {
-                displayName: sanitizeDisplayName(m.displayName),
+                displayName: m.displayName,
                 name: slug,
                 maxTokens: 1048576,
                 maxOutputTokens: 4096,
@@ -1399,7 +1372,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
         customModels.forEach((m) => {
           const slug = toSlug(m);
           mappedCustom[slug] = {
-            displayName: sanitizeDisplayName(m.displayName),
+            displayName: m.displayName,
             name: slug,
             maxTokens: 1048576,
             maxOutputTokens: 4096,
@@ -1446,7 +1419,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
               JSON.stringify({
                 models: customModels.map((m) => ({
                   name: m.name,
-                  displayName: sanitizeDisplayName(m.displayName),
+                  displayName: m.displayName,
                   description: m.description,
                   supportedGenerationMethods: ['generateContent'],
                 })),
@@ -1465,7 +1438,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
             const mappedCustom = customModels.map((m) => ({
               name: 'models/' + generateModelPlaceholderId(m),
               version: '1.0',
-              displayName: sanitizeDisplayName(m.displayName),
+              displayName: m.displayName,
               description: m.description,
               inputTokenLimit: 1048576,
               outputTokenLimit: 4096,
@@ -1489,7 +1462,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
             const mappedCustom = customModels.map((m) => ({
               name: 'models/' + generateModelPlaceholderId(m),
               version: '1.0',
-              displayName: sanitizeDisplayName(m.displayName),
+              displayName: m.displayName,
               description: m.description,
               inputTokenLimit: 1048576,
               outputTokenLimit: 4096,
@@ -1509,7 +1482,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
           JSON.stringify({
             models: customModels.map((m) => ({
               name: m.name,
-              displayName: sanitizeDisplayName(m.displayName),
+              displayName: m.displayName,
               description: m.description,
               supportedGenerationMethods: ['generateContent'],
             })),
@@ -1551,9 +1524,14 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
             );
             const isStream = req.url!.includes('streamGenerateContent') || req.url!.includes('alt=sse');
             const actualGeminiBody = (reqJson.request || reqJson) as GeminiRequestBody;
+            // Use the Cloud Code requestId as the conversation/session identifier so
+            // cross-turn cached state (tool_call_id, reasoning) is isolated between
+            // concurrent sessions using the SAME model. Falls back to model-only
+            // scoping when the envelope omits requestId.
+            const sessionId = reqJson.requestId as string | undefined;
             // Resolve fileData URIs then route to translator
             resolveFileData(actualGeminiBody, req.headers as Record<string, string | string[] | undefined>).then(() => {
-              handleCustomModelRequest(res, matchedCustomModel, actualGeminiBody, isStream);
+              handleCustomModelRequest(res, matchedCustomModel, actualGeminiBody, isStream, sessionId);
             });
             return;
           }

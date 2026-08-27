@@ -12,9 +12,13 @@ export interface StreamContext {
 }
 
 export interface StateTimestamps {
+  /** keyed by streamId */
   streamCtx: Map<string, number>;
+  /** keyed by stateKey(modelName, sessionId) */
   toolCallIds: Map<string, number>;
+  /** keyed by tool_call_id */
   translatedCalls: Map<string, number>;
+  /** keyed by stateKey(modelName, sessionId) */
   reasoning: Map<string, number>;
 }
 
@@ -27,10 +31,27 @@ export interface TranslatedCallInfo {
 
 // ─── State ────────────────────────────────────────────────────────────────
 
-/** modelName → { "functionName": "original_tool_call_id" } */
+/**
+ * Computes the cross-turn state key for a given model.
+ *
+ * Tool-call / reasoning state is scoped per SESSION (conversation), not just per
+ * model. Multiple IDE windows or subagents running the SAME model concurrently
+ * would otherwise overwrite each other's `tool_call_id`/reasoning and cause
+ * upstream 400 Bad Request (e.g. `tool_use_id not found`).
+ *
+ * When a `sessionId` is available the key becomes `model|sessionId`, so
+ * concurrent conversations are isolated. When it is absent the key degrades to
+ * just the model name (safe, but not session-safe — callers must pass a session
+ * id in multi-conversation contexts).
+ */
+export function stateKey(modelName: string, sessionId?: string): string {
+  return sessionId ? `${modelName}|${sessionId}` : modelName;
+}
+
+/** stateKey(modelName, sessionId) → { "functionName": "original_tool_call_id" } */
 export const modelToolCallIds = new Map<string, Record<string, string>>();
 
-/** modelName → preserved reasoning_content from previous turn */
+/** stateKey(modelName, sessionId) → preserved reasoning_content from previous turn */
 export const modelReasoningContent = new Map<string, string>();
 
 /** streamId → { accumulatedText, accumulatedReasoning, toolCalls } */

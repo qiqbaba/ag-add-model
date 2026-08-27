@@ -15,15 +15,15 @@ import log from 'electron-log';
 // ─── Types ────────────────────────────────────────────────────────────────
 
 export interface TranslatorModule {
-  mapGeminiToOpenAI?: (body: unknown, modelName: string) => unknown;
-  mapOpenAIToGemini?: (res: unknown, modelName: string) => unknown;
-  mapOpenAIChunkToGemini?: (chunk: unknown, modelName: string) => unknown | null;
-  mapGeminiToAnthropic?: (body: unknown, modelName: string) => unknown;
-  mapAnthropicToGemini?: (res: unknown, modelName: string) => unknown;
-  mapAnthropicChunkToGemini?: (chunk: unknown, modelName: string) => unknown | null;
-  mapGeminiToGoogle?: (body: unknown, modelName: string) => unknown;
-  mapGoogleToGemini?: (res: unknown, modelName: string) => unknown;
-  mapGoogleChunkToGemini?: (chunk: unknown, modelName: string) => unknown | null;
+  mapGeminiToOpenAI?: (body: unknown, modelName: string, sessionId?: string) => unknown;
+  mapOpenAIToGemini?: (res: unknown, modelName: string, sessionId?: string) => unknown;
+  mapOpenAIChunkToGemini?: (chunk: unknown, modelName: string, sessionId?: string) => unknown | null;
+  mapGeminiToAnthropic?: (body: unknown, modelName: string, sessionId?: string) => unknown;
+  mapAnthropicToGemini?: (res: unknown, modelName: string, sessionId?: string) => unknown;
+  mapAnthropicChunkToGemini?: (chunk: unknown, modelName: string, sessionId?: string) => unknown | null;
+  mapGeminiToGoogle?: (body: unknown, modelName: string, sessionId?: string) => unknown;
+  mapGoogleToGemini?: (res: unknown, modelName: string, sessionId?: string) => unknown;
+  mapGoogleChunkToGemini?: (chunk: unknown, modelName: string, sessionId?: string) => unknown | null;
   getGoogleApiUrl?: (baseUrl: string, modelName: string, isStream: boolean) => string;
   [key: string]: unknown;
 }
@@ -104,54 +104,71 @@ export function getTranslator(provider: string): TranslatorModule | null {
   return translators.get('openai') || null;
 }
 
-export function translateRequest(provider: string, geminiBody: unknown, modelName: string): unknown {
+export function translateRequest(
+  provider: string,
+  geminiBody: unknown,
+  modelName: string,
+  sessionId?: string,
+): unknown {
   const t = getTranslator(provider);
 
   if (provider === 'google') return geminiBody;
   if (OPENAI_COMPAT.has(provider))
-    return t?.mapGeminiToOpenAI ? t.mapGeminiToOpenAI(geminiBody, modelName) : geminiBody;
+    return t?.mapGeminiToOpenAI ? t.mapGeminiToOpenAI(geminiBody, modelName, sessionId) : geminiBody;
   if (ANTHROPIC_COMPAT.has(provider))
-    return t?.mapGeminiToAnthropic ? t.mapGeminiToAnthropic(geminiBody, modelName) : geminiBody;
+    return t?.mapGeminiToAnthropic ? t.mapGeminiToAnthropic(geminiBody, modelName, sessionId) : geminiBody;
 
   // Generic: try mapGeminiTo<Provider> convention
   const fnName = `mapGeminiTo${provider.charAt(0).toUpperCase() + provider.slice(1)}`;
   if (t && typeof t[fnName] === 'function') {
-    return (t[fnName] as (...args: unknown[]) => unknown)(geminiBody, modelName);
+    return (t[fnName] as (...args: unknown[]) => unknown)(geminiBody, modelName, sessionId);
   }
 
   log.warn(`[TranslatorRegistry] No request translator for provider "${provider}", passing through`);
   return geminiBody;
 }
 
-export function translateResponse(provider: string, providerRes: unknown, modelName: string): unknown {
+export function translateResponse(
+  provider: string,
+  providerRes: unknown,
+  modelName: string,
+  sessionId?: string,
+): unknown {
   const t = getTranslator(provider);
 
   if (provider === 'google') return providerRes;
   if (OPENAI_COMPAT.has(provider))
-    return t?.mapOpenAIToGemini ? t.mapOpenAIToGemini(providerRes, modelName) : providerRes;
+    return t?.mapOpenAIToGemini ? t.mapOpenAIToGemini(providerRes, modelName, sessionId) : providerRes;
   if (ANTHROPIC_COMPAT.has(provider))
-    return t?.mapAnthropicToGemini ? t.mapAnthropicToGemini(providerRes, modelName) : providerRes;
+    return t?.mapAnthropicToGemini ? t.mapAnthropicToGemini(providerRes, modelName, sessionId) : providerRes;
 
   const fnName = `map${provider.charAt(0).toUpperCase() + provider.slice(1)}ToGemini`;
   if (t && typeof t[fnName] === 'function') {
-    return (t[fnName] as (...args: unknown[]) => unknown)(providerRes, modelName);
+    return (t[fnName] as (...args: unknown[]) => unknown)(providerRes, modelName, sessionId);
   }
 
   log.warn(`[TranslatorRegistry] No response translator for provider "${provider}", passing through`);
   return providerRes;
 }
 
-export function translateStreamChunk(provider: string, chunk: unknown, modelName: string): unknown {
+export function translateStreamChunk(
+  provider: string,
+  chunk: unknown,
+  modelName: string,
+  sessionId?: string,
+): unknown {
   const t = getTranslator(provider);
 
-  if (provider === 'google') return t?.mapGoogleChunkToGemini ? t.mapGoogleChunkToGemini(chunk, modelName) : null;
-  if (OPENAI_COMPAT.has(provider)) return t?.mapOpenAIChunkToGemini ? t.mapOpenAIChunkToGemini(chunk, modelName) : null;
+  if (provider === 'google')
+    return t?.mapGoogleChunkToGemini ? t.mapGoogleChunkToGemini(chunk, modelName, sessionId) : null;
+  if (OPENAI_COMPAT.has(provider))
+    return t?.mapOpenAIChunkToGemini ? t.mapOpenAIChunkToGemini(chunk, modelName, sessionId) : null;
   if (ANTHROPIC_COMPAT.has(provider))
-    return t?.mapAnthropicChunkToGemini ? t.mapAnthropicChunkToGemini(chunk, modelName) : null;
+    return t?.mapAnthropicChunkToGemini ? t.mapAnthropicChunkToGemini(chunk, modelName, sessionId) : null;
 
   const fnName = `map${provider.charAt(0).toUpperCase() + provider.slice(1)}ChunkToGemini`;
   if (t && typeof t[fnName] === 'function') {
-    return (t[fnName] as (...args: unknown[]) => unknown)(chunk, modelName);
+    return (t[fnName] as (...args: unknown[]) => unknown)(chunk, modelName, sessionId);
   }
 
   return null;

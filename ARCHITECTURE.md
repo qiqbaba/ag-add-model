@@ -145,7 +145,7 @@ Antigravity 使用 Google 专有的 **Cloud Code 内部 API**（`v1internal:*` �
 |---|---|---|
 | `name` | `string` | 模型 Slug（如 `extm-gpt-4o`） |
 | `model` | `string` | 占位符 ID（如 `MODEL_PLACEHOLDER_M401`） |
-| `displayName` | `string` | 清洗后的显示名称（由 `sanitizeDisplayName()` 处理） |
+| `displayName` | `string` | 用户配置的原始显示名称（原样透传，**不做关键词清洗**） |
 | `tagTitle` | `string` | `'Custom'` |
 | `tagDescription` | `string` | `'User-configured model'` |
 | `modelExperiments` | `object` | `{ experiments: {} }` |
@@ -160,7 +160,7 @@ Antigravity 使用 Google 专有的 **Cloud Code 内部 API**（`v1internal:*` �
 
 #### 3. 分组注入规则
 * **必须追加到 `agentModelSorts[0].groups[0].modelIds` 末尾**：前端只渲染第一个 Recommended 分组中的模型，独立分组会被前端忽略（详见 [坑 6](#坑-6前端仅渲染-agentmodelsorts-第一个分组)）。
-* **Slug 与显示名称清洗**：`toSlug()` 与 `sanitizeDisplayName()` 会自动将 `flash`→`fx`、`pro`→`pr0`、`low`→`l0w`、`high`→`h1gh` 等分级词汇替换，避免命中国方 Tier 模式导致归类紊乱。
+* **名称与 Slug 原样保留（不做字符替换）**：`displayName` 与 `toSlug()` 生成的 slug（`extm-*`）均**原样保留**用户配置，不会将 `flash`/`pro`/`low`/`high` 等词汇替换为 `fx`/`pr0`/`l0w`/`h1gh`。Tier 归类紊乱由上层元数据兜底：注入条目补齐完整字段且 `thinkingLevel: 0`（`UNSPECIFIED`），前端不再因关键词归类而崩溃或过滤（见 [坑 7](#坑-7字段缺失导致官方-lowmediumhigh-子菜单-nan-崩溃) 与 [坑 8](#坑-8protobuf-枚举类型不匹配thinkinglevel-必须为-int32-数字)）。
 * **Slug 唯一性（优先 `displayName`）**：`toSlug()` 以 `displayName || externalModelName || name` 生成 slug，并在加载时经 `assignUniqueSlugsAndPlaceholders()` 预分配唯一 `_slug`；`fetchAvailableModels` 合并时始终使用 `m._slug || toSlug(m)`。**切勿**在合并时重新调用 `toSlug()`，否则相同 `externalModelName` 的多模型会同名覆盖（见 [坑 10](#坑-10多自定义模型仅显示-n-1-个同名-slug-覆写)）。
 
 ---
@@ -516,7 +516,7 @@ OpenAI 兼容自定义模型（`openai` / `custom` / `openrouter` / `ollama` 等
 
 1. **自动更新覆盖**：Antigravity IDE 自动更新会重写 `out\main.js` 与渲染层文件，更新后重新运行一次 `.\deploy-ide.ps1` 即可恢复（`settings.json` 与 `custom_models.json` 会永久保留）。
 2. **前端选择器多模型支持（已完美优化）**：早期版本由于前端下拉面板 `POu` 的 `max-h-80`（320px）与 `scrollbar-none` 限制，导致第 4 个及以后的自定义模型被视觉遮挡。当前部署流程会自动对 `workbench.desktop.main.js` 应用高度与滚动补丁（扩展至 `min(85vh, 600px)` 并启用平滑滚动条，同步更新 `product.json` 校验哈希），已支持同时配置 20+ 个自定义模型无限制浏览与选用。**注意**：IDE 自动更新会重写该文件导致补丁失效，更新后需重新运行 `.\deploy-ide.ps1`。
-3. **名称关键字过滤**：自定义模型的 `displayName` 应尽量避免包含 `flash`/`lite`/`pro`/`low`/`high`/`tier` 等词汇，防止命中国方分级过滤规则。
+3. **名称关键字过滤（已解除）**：早期版本自定义模型的 `displayName` 含 `flash`/`lite`/`pro`/`low`/`high`/`tier` 等分级词汇会被前关键词清洗为 `fx`/`pr0` 等变体。现注入条目已补齐完整元数据且 `thinkingLevel: 0`，显示名称与 slug 均**原样透传**，不再清洗，也不会再被分级过滤（见 [坑 7](#坑-7字段缺失导致官方-lowmediumhigh-子菜单-nan-崩溃)）。
 4. **同名上游模型 id**：不同提供商的模型若 `externalModelName` 相同，`toSlug()` 已按 `displayName` 优先生成互不相同的 slug（见 [坑 10](#坑-10多自定义模型仅显示-n-1-个同名-slug-覆写)），但**同一配置内 `displayName` 不宜重复**，否则仍会因 slug 冲突而丢失模型。
 5. **图像输入取决于模型视觉能力**：代理会正确构造 `image_url` / `type: "image"` 结构（见 [2.7 节](#27-多模态视觉vision-输入处理)），但图像能否被“看见”仍取决于所用模型是否支持视觉。对不支持图像的模型（如部分 DeepSeek、Llama 文本模型），图像内容块可能被上游忽略或报错。
 

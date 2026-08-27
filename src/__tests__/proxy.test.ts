@@ -35,10 +35,11 @@ function generateModelPlaceholderId(model: { displayName?: string; name?: string
 
 // ─── Test: toSlug (via concept) ───────────────────────────────────────────
 
-function toSlug(model: { externalModelName?: string; name?: string }): string {
+function toSlug(model: { displayName?: string; externalModelName?: string; name?: string }): string {
+  const rawName = model.displayName || model.externalModelName || model.name || 'custom-model';
   return (
-    'custom-' +
-    (model.externalModelName || model.name || '')
+    'extm-' +
+    rawName
       .replace(/^models\//, '')
       .replace(/[^a-zA-Z0-9]+/g, '-')
       .replace(/^-+|-+$/g, '')
@@ -120,39 +121,48 @@ describe('generateModelPlaceholderId', () => {
 });
 
 describe('toSlug', () => {
-  it('prefixes with "custom-"', () => {
+  it('prefixes with "extm-"', () => {
     const slug = toSlug({ name: 'gpt-4o' });
-    expect(slug).toMatch(/^custom-/);
+    expect(slug).toMatch(/^extm-/);
   });
 
   it('removes "models/" prefix from externalModelName', () => {
     const slug = toSlug({ externalModelName: 'models/gpt-4o' });
-    expect(slug).toBe('custom-gpt-4o');
+    expect(slug).toBe('extm-gpt-4o');
   });
 
   it('replaces non-alphanumeric chars with hyphens', () => {
     const slug = toSlug({ name: 'GPT 4o (Latest)' });
-    expect(slug).toBe('custom-gpt-4o-latest');
+    expect(slug).toBe('extm-gpt-4o-latest');
   });
 
   it('removes leading and trailing hyphens', () => {
     const slug = toSlug({ name: '--test--' });
-    expect(slug).toBe('custom-test');
+    expect(slug).toBe('extm-test');
   });
 
   it('lowercases the result', () => {
     const slug = toSlug({ name: 'GPT-4O' });
-    expect(slug).toBe('custom-gpt-4o');
+    expect(slug).toBe('extm-gpt-4o');
   });
 
   it('uses externalModelName over name', () => {
     const slug = toSlug({ name: 'gpt-4o', externalModelName: 'openai/gpt-4o' });
-    expect(slug).toBe('custom-openai-gpt-4o');
+    expect(slug).toBe('extm-openai-gpt-4o');
   });
 
   it('handles OpenRouter model format (provider/model)', () => {
     const slug = toSlug({ externalModelName: 'openai/gpt-4o' });
-    expect(slug).toBe('custom-openai-gpt-4o');
+    expect(slug).toBe('extm-openai-gpt-4o');
+  });
+
+  it('preserves tier-family keywords verbatim (no mutation)', () => {
+    expect(toSlug({ name: 'gpt-4o', displayName: 'DeepSeek-V3 Pro' })).toBe('extm-deepseek-v3-pro');
+    expect(toSlug({ name: 'gpt-4o', displayName: 'Gemini 1.5 Flash' })).toBe('extm-gemini-1-5-flash');
+    expect(toSlug({ name: 'gpt-4o', displayName: 'Claude 3.5 Sonnet (High Temp)' })).toBe(
+      'extm-claude-3-5-sonnet-high-temp',
+    );
+    expect(toSlug({ name: 'gpt-4o', displayName: 'Llama 3 Lite' })).toBe('extm-llama-3-lite');
   });
 });
 
@@ -246,7 +256,12 @@ describe('multi-model agentModelSorts merge logic', () => {
   });
 
   it('generates distinct slugs for models sharing the same externalModelName but different displayName', () => {
-    function toSlugUpdated(model: { displayName?: string; externalModelName?: string; name?: string; _slug?: string }): string {
+    function toSlugUpdated(model: {
+      displayName?: string;
+      externalModelName?: string;
+      name?: string;
+      _slug?: string;
+    }): string {
       if (model._slug) return model._slug;
       const rawName = model.displayName || model.externalModelName || model.name || 'custom-model';
       return (
@@ -278,5 +293,3 @@ describe('multi-model agentModelSorts merge logic', () => {
     expect(slugB).toBe('extm-deepseek-v4-flash-0731');
   });
 });
-
-

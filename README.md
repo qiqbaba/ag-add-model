@@ -293,7 +293,7 @@ Antigravity IDE 自动更新会覆盖已注入的文件（`out\main.js`、`out\p
 4. 用**测试连接**按钮验证端点可达性
 5. 若界面显示的模型比配置数量少 1 个以上：多为**同名 slug 覆写**（两个模型 `externalModelName` 相同），已由 `toSlug()` 按 `displayName` 优先解决（见 ARCHITECTURE 文档“坑 10”）。
 6. 若模型已注入配置齐全但仍超过约 10 项显示不全：为前端 `max-h-80`（320px）高度截断，需确保 `deploy-ide.ps1` 第 6 步的 workbench 高度/滚动补丁已生效（IDE 更新会使其失效），重跑部署即可。
-7. 若模型显示名称含 `flash`/`lite`/`low`/`medium`/`high`/`pro`/`tier` 等分级词汇，可能被前端过滤，请改名后重试
+7. 若模型显示名称含 `flash`/`lite`/`low`/`medium`/`high`/`pro`/`tier` 等分级词汇：现已原样透传不再清洗，一般不会导致过滤；仅当仍显示异常时再排查，不必改名。
 
 ### 连接超时
 1. 检查提供商 API 是否可达（`curl -I <apiUrl>`）
