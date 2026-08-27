@@ -70,7 +70,21 @@ Antigravity IDE
 
 Antigravity 使用 Google 的 **Cloud Code 内部 API**（`v1internal:*` 端点）而非公开 Gemini API。代理处理以下差异：
 
-1. **fetchAvailableModels**：拦截并注入自定义模型定义。自定义模型 slug 被加入 `agentModelSorts`，从而出现在聊天模型下拉列表中。自定义模型省略配额信息，因为它们使用用户自己的 API 密钥。
+1. **fetchAvailableModels**：拦截并注入自定义模型定义。响应中 `models` 是对象映射（key 为模型 id），
+   `agentModelSorts` 定义模型分组。自定义模型必须同时：
+   - 加入 `models` 映射（key = `extm-*` slug，`toSlug` 会清洗 `flash/pro/low/medium/high/tier/lite` 关键字，
+     其中 `flash`→`flsh`→`fx`、`lite`→`lt`，显示名称则由 `sanitizeDisplayName()` 同步清洗）；
+   - **加入 `agentModelSorts[0].groups[0].modelIds`**（前端只渲染该第一个分组的模型，额外分组会被忽略）；
+   - 补全官方条目字段（`thinkingBudget`、`minThinkingBudget`、`quotaInfo`、`name`），否则前端分级分组会崩溃。
+   自定义模型省略配额信息，因为它们使用用户自己的 API 密钥。
+   > **2026-08-27 修复**：若只补基础字段，官方 Low/Medium/High 子菜单仍会被遮挡（只露一条边缘）。根因是自定义模型
+   > 字段不完整导致前端 NaN 崩溃。补齐 `tagTitle`、`tagDescription`、`modelExperiments`、`thinkingLevel` 等**全部
+   > protobuf 字段**后，子菜单在自定义模型出现时也能正常展开。详见
+   > [DEPLOY_ANTIGRAVITY_IDE.md](./DEPLOY_ANTIGRAVITY_IDE.md) 坑 7。
+   > ⚠️ 注意：`thinkingLevel` 是 **int32 枚举**，必须传数字 `0`（`THINKING_LEVEL_UNSPECIFIED`），不能传字符串
+   > `'THINKING_LEVEL_UNSPECIFIED'`，否则 LS 报 `cannot decode field ... thinking_level` 错误，导致登录卡死（见坑 8）。
+   > **已知限制**：前端下拉列表仅渲染约 10 项，超过 3 个的自定义模型不会出现在下拉中；且显示名称含分级关键字
+   > （`flash`/`lite`/`low`/`medium`/`high`/`pro`/`tier`）的模型可能被前端过滤，建议避免。
 
 2. **streamGenerateContent/generateContent**：Cloud Code 把 Gemini 请求包在一个 `request` 字段里：
    ```json
@@ -515,6 +529,8 @@ Antigravity IDE 自动更新会覆盖已注入的文件（`out\main.js`、`out\p
 2. 检查 `apiUrl` 是否正确
 3. 添加模型后重启 Antigravity
 4. 用**测试连接**按钮验证端点可达性
+5. 若自定义模型超过 3 个，注意前端下拉列表仅渲染约 10 项，多余模型不会出现在下拉中（见上文"工作原理"中的已知限制）
+6. 若模型显示名称含 `flash`/`lite`/`low`/`medium`/`high`/`pro`/`tier` 等分级词汇，可能被前端过滤，请改名后重试
 
 ### 连接超时
 1. 检查提供商 API 是否可达（`curl -I <apiUrl>`）

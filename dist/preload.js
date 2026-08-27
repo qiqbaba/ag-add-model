@@ -1023,6 +1023,8 @@ window.addEventListener('DOMContentLoaded', () => {
                 .replace(/^-+|-+$/g, '')
                 .toLowerCase()
                 .replace(/flash/g, 'flsh')
+                .replace(/flsh/g, 'fx')
+                .replace(/lite/g, 'lt')
                 .replace(/tier/g, 'tter')
                 .replace(/low/g, 'l0w')
                 .replace(/medium/g, 'med1um')

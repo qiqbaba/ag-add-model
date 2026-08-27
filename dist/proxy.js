@@ -78,9 +78,11 @@ function getCustomModelsPath() {
     return path.join(geminiDir, 'custom_models.json');
 }
 function toSlug(model) {
-    // Tier keywords (flash/pro/low/medium/high/tier) in model IDs pollute the
+    // Tier keywords (flash/pro/low/medium/high/tier/lite) in model IDs pollute the
     // LS tier-family grouping and break the official Low/Medium/High submenu.
-    // Substitute them so injected IDs never match tier patterns.
+    // Substitute them so injected IDs never match tier patterns. `flash` is
+    // rewritten to `flsh` then to `fx` so the sanitized form itself never
+    // matches tier detection either.
     return ('extm-' +
         (model.externalModelName || model.name)
             .replace(/^models\//, '')
@@ -88,11 +90,32 @@ function toSlug(model) {
             .replace(/^-+|-+$/g, '')
             .toLowerCase()
             .replace(/flash/g, 'flsh')
+            .replace(/flsh/g, 'fx')
+            .replace(/lite/g, 'lt')
             .replace(/tier/g, 'tter')
             .replace(/low/g, 'l0w')
             .replace(/medium/g, 'med1um')
             .replace(/high/g, 'h1gh')
             .replace(/pro/g, 'pr0'));
+}
+/**
+ * Strips LS tier-family keywords from a custom model's display name.
+ * The LS frontend matches tier families (flash/lite/low/medium/high/pro) on
+ * BOTH the model id and the display name; a custom model whose friendly name
+ * contains one of these keywords gets misclassified as a tiered model and then
+ * hidden from the picker. Mirror `toSlug` substitutions so injected names never
+ * match tier patterns.
+ */
+function sanitizeDisplayName(name) {
+    return (name || '')
+        .replace(/flash/gi, 'flsh')
+        .replace(/flsh/gi, 'fx')
+        .replace(/lite/gi, 'lt')
+        .replace(/tier/gi, 'tter')
+        .replace(/low/gi, 'l0w')
+        .replace(/medium/gi, 'med1um')
+        .replace(/high/gi, 'h1gh')
+        .replace(/pro/gi, 'pr0');
 }
 // ─── Model Loading ────────────────────────────────────────────────────────
 function loadCustomModels() {
@@ -925,7 +948,7 @@ function handleRequest(req, res) {
                         customModels.forEach((m) => {
                             const slug = toSlug(m);
                             mappedCustom[slug] = {
-                                displayName: m.displayName,
+                                displayName: sanitizeDisplayName(m.displayName),
                                 name: slug,
                                 maxTokens: 1048576,
                                 maxOutputTokens: 4096,
@@ -954,7 +977,7 @@ function handleRequest(req, res) {
                                     return {
                                         name: 'models/' + generateModelPlaceholderId(m),
                                         version: '1.0',
-                                        displayName: m.displayName,
+                                        displayName: sanitizeDisplayName(m.displayName),
                                         description: m.description,
                                         inputTokenLimit: cap.maxTokens,
                                         outputTokenLimit: cap.maxOutputTokens,
@@ -972,12 +995,12 @@ function handleRequest(req, res) {
                                     const slug = toSlug(m);
                                     const cap = (0, modelUtils_1.detectModelCapabilities)(m, true);
                                     const entry = {
-                                        displayName: m.displayName,
+                                        displayName: sanitizeDisplayName(m.displayName),
                                         supportsImages: cap.supportsImages,
                                         supportsThinking: cap.isThinking,
                                         thinkingBudget: cap.isThinking ? 4096 : 0,
                                         minThinkingBudget: cap.isThinking ? 1024 : 0,
-                                        quotaInfo: { remainingFraction: 1 },
+                                        quotaInfo: { remainingFraction: 1, resetTime: new Date(Date.now() + 86400000).toISOString() },
                                         recommended: true,
                                         name: slug,
                                         maxTokens: cap.maxTokens,
@@ -986,6 +1009,34 @@ function handleRequest(req, res) {
                                         model: generateModelPlaceholderId(m),
                                         apiProvider: 'API_PROVIDER_GOOGLE_GEMINI',
                                         modelProvider: 'MODEL_PROVIDER_GOOGLE',
+                                        tagTitle: 'Custom',
+                                        tagDescription: 'User-configured model',
+                                        supportsVideo: false,
+                                        modelExperiments: { experiments: {} },
+                                        supportsAdaptiveThinking: false,
+                                        supportsThoughtCirculation: false,
+                                        // thinkingLevel is an int32 proto enum (varint): MUST be a
+                                        // number (0 = THINKING_LEVEL_UNSPECIFIED). Passing the enum
+                                        // name as a string makes the LS Go decoder reject the whole
+                                        // fetchAvailableModels response and breaks login (坑 8).
+                                        thinkingLevel: 0,
+                                        requiresNoXmlToolExamples: false,
+                                        preview: false,
+                                        disabled: false,
+                                        beta: false,
+                                        isInternal: false,
+                                        supportsCumulativeContext: false,
+                                        tabJumpPrintLineRange: false,
+                                        supportsEstimateTokenCounter: false,
+                                        addCursorToFindReplaceTarget: false,
+                                        toolFormatterType: 'TOOL_FORMATTER_TYPE_XML',
+                                        supportsRawThinking: false,
+                                        supportsPdf: cap.supportsImages,
+                                        requiresLeadInGeneration: false,
+                                        requiresImageOutputOutsideFunctionResponses: false,
+                                        supportsDeferredToolLoading: false,
+                                        vertexModelId: '',
+                                        modelUrl: '',
                                     };
                                     if (cap.supportsImages) {
                                         entry.supportsVideo = false;
@@ -1053,7 +1104,7 @@ function handleRequest(req, res) {
                             customModels.forEach((m) => {
                                 const slug = toSlug(m);
                                 modelsMap[slug] = {
-                                    displayName: m.displayName,
+                                    displayName: sanitizeDisplayName(m.displayName),
                                     name: slug,
                                     recommended: true,
                                     maxTokens: 1048576,
@@ -1067,11 +1118,14 @@ function handleRequest(req, res) {
                             });
                             googleJson.models = modelsMap;
                         }
-                        // Add custom models to the FIRST group of each sort so they appear
-                        // in the model picker (the frontend only renders models referenced
-                        // in agentModelSorts). The slug is the exact id present in the
-                        // merged `models` map for each custom model.
+                        // Add custom models to the end of groups[0].modelIds of each sort.
+                        // With the complete field entries (tagTitle, modelExperiments, etc.)
+                        // the official tiered submenu rendering no longer breaks — the
+                        // missing fields were the root cause of the NaN crash that caused
+                        // the submenu to be obscured. Reverse the order so the "last"
+                        // custom models (which were previously missing) appear first.
                         const customSlugs = customModels.map((m) => (m._slug || toSlug(m))).filter(Boolean);
+                        customSlugs.reverse();
                         if (customSlugs.length > 0 &&
                             googleJson.agentModelSorts &&
                             Array.isArray(googleJson.agentModelSorts)) {
@@ -1097,6 +1151,19 @@ function handleRequest(req, res) {
                         catch (e) {
                             electron_log_1.default.error('[Proxy] DEBUG dump failed', e);
                         }
+                        // Fallback entry points: also surface custom models in command /
+                        // tab / web-search model lists so they remain selectable even if
+                        // the picker only renders the first group.
+                        const extraIdLists = ['commandModelIds', 'tabModelIds', 'webSearchModelIds'];
+                        for (const listKey of extraIdLists) {
+                            const list = googleJson[listKey];
+                            if (Array.isArray(list)) {
+                                customSlugs.forEach((slug) => {
+                                    if (!list.includes(slug))
+                                        list.push(slug);
+                                });
+                            }
+                        }
                         res.writeHead(200, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify(googleJson));
                     }
@@ -1107,7 +1174,7 @@ function handleRequest(req, res) {
                         customModels.forEach((m) => {
                             const slug = toSlug(m);
                             mappedCustom[slug] = {
-                                displayName: m.displayName,
+                                displayName: sanitizeDisplayName(m.displayName),
                                 name: slug,
                                 maxTokens: 1048576,
                                 maxOutputTokens: 4096,
@@ -1128,7 +1195,7 @@ function handleRequest(req, res) {
                 customModels.forEach((m) => {
                     const slug = toSlug(m);
                     mappedCustom[slug] = {
-                        displayName: m.displayName,
+                        displayName: sanitizeDisplayName(m.displayName),
                         name: slug,
                         maxTokens: 1048576,
                         maxOutputTokens: 4096,
@@ -1169,7 +1236,7 @@ function handleRequest(req, res) {
                         res.end(JSON.stringify({
                             models: customModels.map((m) => ({
                                 name: m.name,
-                                displayName: m.displayName,
+                                displayName: sanitizeDisplayName(m.displayName),
                                 description: m.description,
                                 supportedGenerationMethods: ['generateContent'],
                             })),
@@ -1185,7 +1252,7 @@ function handleRequest(req, res) {
                         const mappedCustom = customModels.map((m) => ({
                             name: 'models/' + generateModelPlaceholderId(m),
                             version: '1.0',
-                            displayName: m.displayName,
+                            displayName: sanitizeDisplayName(m.displayName),
                             description: m.description,
                             inputTokenLimit: 1048576,
                             outputTokenLimit: 4096,
@@ -1209,7 +1276,7 @@ function handleRequest(req, res) {
                         const mappedCustom = customModels.map((m) => ({
                             name: 'models/' + generateModelPlaceholderId(m),
                             version: '1.0',
-                            displayName: m.displayName,
+                            displayName: sanitizeDisplayName(m.displayName),
                             description: m.description,
                             inputTokenLimit: 1048576,
                             outputTokenLimit: 4096,
@@ -1227,7 +1294,7 @@ function handleRequest(req, res) {
                 res.end(JSON.stringify({
                     models: customModels.map((m) => ({
                         name: m.name,
-                        displayName: m.displayName,
+                        displayName: sanitizeDisplayName(m.displayName),
                         description: m.description,
                         supportedGenerationMethods: ['generateContent'],
                     })),
