@@ -79,8 +79,14 @@ interface GeminiRequestBody {
   };
 }
 
+interface AnthropicImageSource {
+  type: 'base64';
+  media_type: string;
+  data: string;
+}
+
 interface AnthropicContentBlock {
-  type: 'text' | 'tool_use' | 'tool_result' | 'thinking';
+  type: 'text' | 'tool_use' | 'tool_result' | 'thinking' | 'image';
   text?: string;
   thinking?: string;
   id?: string;
@@ -88,6 +94,7 @@ interface AnthropicContentBlock {
   input?: Record<string, unknown>;
   tool_use_id?: string;
   content?: string | AnthropicContentBlock[];
+  source?: AnthropicImageSource;
 }
 
 type AnthropicMessageRole = 'user' | 'assistant';
@@ -238,36 +245,47 @@ export function mapGeminiToAnthropic(geminiBody: GeminiRequestBody, modelName: s
           messages.push({ role: 'user', content: contentBlocks });
         } else {
           const roleStr = item.role === 'model' ? 'assistant' : item.role || 'user';
-          let content = '';
-          if (item.parts) {
-            const partsContent: string[] = [];
-            for (const p of item.parts) {
-              if (p.text) {
-                partsContent.push(p.text);
-              } else if ((p as any).fileData) {
-                const fd = (p as any).fileData;
-                try {
-                  const url = new URL(fd.fileUri);
-                  if (url.protocol === 'file:') {
-                    const fs = require('fs');
-                    partsContent.push(
-                      `[File:\n${fs.readFileSync(url.pathname.replace(/^\//, '').replace(/\//g, path.sep), 'utf-8')}\n]`,
-                    );
-                  } else {
-                    partsContent.push(`[File: ${fd.fileUri} (${fd.mimeType})]`);
-                  }
-                } catch {
-                  partsContent.push(`[File: ${fd.fileUri} (${fd.mimeType})]`);
+          const parts = item.parts || [];
+          const contentBlocks: AnthropicContentBlock[] = [];
+          const textParts: string[] = [];
+          const hasImage = parts.some((p) => (p as any).inlineData && (p as any).inlineData.mimeType?.startsWith('image/'));
+          for (const p of parts) {
+            if (p.text) {
+              textParts.push(p.text);
+              if (hasImage) contentBlocks.push({ type: 'text', text: p.text });
+            } else if ((p as any).fileData) {
+              const fd = (p as any).fileData;
+              let textContent: string;
+              try {
+                const url = new URL(fd.fileUri);
+                if (url.protocol === 'file:') {
+                  const fs = require('fs');
+                  textContent = `[File:\n${fs.readFileSync(url.pathname.replace(/^\//, '').replace(/\//g, path.sep), 'utf-8')}\n]`;
+                } else {
+                  textContent = `[File: ${fd.fileUri} (${fd.mimeType})]`;
                 }
-              } else if ((p as any).inlineData) {
-                const id = (p as any).inlineData;
-                partsContent.push(`[${id.mimeType}: ${id.data}]`);
+              } catch {
+                textContent = `[File: ${fd.fileUri} (${fd.mimeType})]`;
+              }
+              textParts.push(textContent);
+              if (hasImage) contentBlocks.push({ type: 'text', text: textContent });
+            } else if ((p as any).inlineData) {
+              const id = (p as any).inlineData;
+              if (id.mimeType && id.mimeType.startsWith('image/')) {
+                contentBlocks.push({ type: 'image', source: { type: 'base64', media_type: id.mimeType, data: id.data } });
+              } else {
+                const textContent = `[Inline data: ${id.mimeType}, length: ${(id.data || '').length} chars]`;
+                textParts.push(textContent);
+                if (hasImage) contentBlocks.push({ type: 'text', text: textContent });
               }
             }
-            content = partsContent.join('\n');
           }
+          const content: string | AnthropicContentBlock[] = hasImage
+            ? contentBlocks
+            : textParts.join('\n');
           if (roleStr === 'system') {
-            system = (system || '') + '\n' + content;
+            const sysContent = typeof content === 'string' ? content : (content as AnthropicContentBlock[]).map((b) => b.text || '').join('\n');
+            system = (system || '') + '\n' + sysContent;
           } else {
             messages.push({ role: roleStr as AnthropicMessageRole, content });
           }

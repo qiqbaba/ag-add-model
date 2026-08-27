@@ -17,6 +17,7 @@
   - [2.4 工具调用（DSML 解析与 tool_use 映射）](#24-工具调用dsml-解析与-tool_use-映射)
   - [2.5 运行时状态管理与 TTL 清理](#25-运行时状态管理与-ttl-清理)
   - [2.6 Schema 校验、动态端口与请求重试](#26-schema-校验动态端口与请求重试)
+  - [2.7 多模态/视觉（Vision）输入处理](#27-多模态视觉vision-输入处理)
 - [三、IDE 部署指南与环境要求](#三ide-部署指南与环境要求)
   - [3.1 IDE 架构要点](#31-ide-架构要点)
   - [3.2 一键部署流程（deploy-ide.ps1）](#32-一键部署流程deploy-ideps1)
@@ -87,6 +88,7 @@ antigravity-add-model/
 │       ├── registry.ts            # 翻译器注册表：自动发现并动态加载 translators/ 模块
 │       ├── shared.ts              # 跨轮次上下文状态管理（Map 隔离 + 托管 TTL 垃圾回收）
 │       ├── modelUtils.ts          # 模型能力集中检测（Thinking、DeepSeek、Claude、Vision 等）
+│       ├── settingsSync.ts        # 运行时端口 ↔ settings.json / active_port 双向同步（JSONC 安全）
 │       └── translators/
 │           ├── openai.ts          # OpenAI ↔ Gemini 双向翻译器（请求、响应、SSE、Tool Calls）
 │           ├── anthropic.ts       # Anthropic ↔ Gemini 双向翻译器（Claude tool_use、Thinking）
@@ -102,8 +104,8 @@ antigravity-add-model/
 ### 1.3 多协议翻译器体系
 
 翻译器注册表（[`src/proxy/registry.ts`](file:///d:/programme/antigravity-add-model/src/proxy/registry.ts)）具备自动发现能力：
-* **OpenAI 兼容协议族**（`openai`, `openrouter`, `custom`, `ollama`, `groq`, `mistral`, `cerebras`, `nvidia` 等）：统一路由至 `openai.ts` 转换器，支持流式 SSE、原生 `tool_calls` 以及 DeepSeek DSML 标签解析。
-* **Anthropic 协议族**（`anthropic`, `claude` 等）：路由至 `anthropic.ts`，映射 `system`、`tool_use`、`content_block_delta` 及 extended thinking 块。
+* **OpenAI 兼容协议族**（`openai`, `openrouter`, `custom`, `ollama`, `groq`, `mistral`, `cerebras`, `nvidia` 等）：统一路由至 `openai.ts` 转换器，支持流式 SSE、原生 `tool_calls`、DeepSeek DSML 标签解析，以及图像输入（`image_url` 内容块）。
+* **Anthropic 协议族**（`anthropic`, `claude` 等）：路由至 `anthropic.ts`，映射 `system`、`tool_use`、`content_block_delta`、extended thinking 块，以及图像输入（`type: "image"` base64 内容块）。
 * **Google AI Studio 协议**（`google`）：原生 Gemini 格式透传，动态根据流式状态挂载 `:streamGenerateContent` 或 `:generateContent`。
 
 ---
@@ -158,6 +160,7 @@ Antigravity 使用 Google 专有的 **Cloud Code 内部 API**（`v1internal:*` �
 #### 3. 分组注入规则
 * **必须追加到 `agentModelSorts[0].groups[0].modelIds` 末尾**：前端只渲染第一个 Recommended 分组中的模型，独立分组会被前端忽略（详见 [坑 6](#坑-6前端仅渲染-agentmodelsorts-第一个分组)）。
 * **Slug 与显示名称清洗**：`toSlug()` 与 `sanitizeDisplayName()` 会自动将 `flash`→`fx`、`pro`→`pr0`、`low`→`l0w`、`high`→`h1gh` 等分级词汇替换，避免命中国方 Tier 模式导致归类紊乱。
+* **Slug 唯一性（优先 `displayName`）**：`toSlug()` 以 `displayName || externalModelName || name` 生成 slug，并在加载时经 `assignUniqueSlugsAndPlaceholders()` 预分配唯一 `_slug`；`fetchAvailableModels` 合并时始终使用 `m._slug || toSlug(m)`。**切勿**在合并时重新调用 `toSlug()`，否则相同 `externalModelName` 的多模型会同名覆盖（见 [坑 10](#坑-10多自定义模型仅显示-n-1-个同名-slug-覆写)）。
 
 ---
 
@@ -243,8 +246,40 @@ Antigravity 使用 Google 专有的 **Cloud Code 内部 API**（`v1internal:*` �
 ### 2.6 Schema 校验、动态端口与请求重试
 
 1. **运行时 Schema 校验**（[`src/schemaValidator.ts`](file:///d:/programme/antigravity-add-model/src/schemaValidator.ts)）：在模型配置加载、API 响应解析、SSE 分块接收时进行严格校验，防止畸形数据导致前端白屏。
-2. **动态端口回退**：代理默认监听 `50999` 端口，若端口冲突自动回退至系统随机空闲端口（`port: 0`），并将实际运行端口写入 `~/.gemini/antigravity/active_port`。
+2. **动态端口回退 + `settings.json` 自动同步**：代理默认监听 `50999` 端口，若端口冲突自动回退至系统随机空闲端口（`port: 0`）。**代理每次启动成功监听后**（[`src/proxy.ts`](file:///d:/programme/antigravity-add-model/src/proxy.ts) `startProxy()` 回调）会自动执行 [`src/proxy/settingsSync.ts`](file:///d:/programme/antigravity-add-model/src/proxy/settingsSync.ts)：
+   - `syncActivePort(port)` 将实际运行端口写入 `~/.gemini/antigravity/active_port`（供 CLI、部署脚本与健康检查读取）；
+   - `syncSettingsJson(port)` 将用户 `settings.json` 中的 `jetski.cloudCodeUrl` 精确同步为 `http://127.0.0.1:<actual_port>/v1internal/xxxxxxx`，保证 Language Server 始终连接代理的实际监听端口。端口恢复到 `50999` 时下次启动也会同步回 `50999`。
+   - JSONC 安全读写：采用带注释/尾随逗号感知的插入与替换，保留用户排版、其余配置项及全部注释；端口一致时幂等跳过写入，避免触发无谓的文件监听事件。
+   - 路径解析：优先通过 Electron `app.getPath('userData')`（如 `%APPDATA%\Antigravity IDE`），并跨平台回退（Windows `%APPDATA%` / macOS `Library/Application Support` / Linux `XDG_CONFIG_HOME`）以兼容独立测试与 CLI 环境。
 3. **指数退避重试**：遇到 429（限流）或 5xx 错误时，根据服务端 `Retry-After` 头或以 `1s → 2s → 4s` 指数级退避重试（最多重试 `maxRetries` 次，默认 3 次）。
+
+### 2.7 多模态/视觉（Vision）输入处理
+
+当用户粘贴截图、或 Agent 自动截图并发送给模型时，Gemini 请求中的图像以 `parts[].inlineData`（`{ mimeType, data }`，`data` 为 base64）形式承载。代理不再将其退化为纯文本占位符，而是构造目标提供商的标准图像结构，使视觉模型真正“看见”图像：
+
+* **OpenAI 兼容协议**（[`src/proxy/translators/openai.ts`](file:///d:/programme/antigravity-add-model/src/proxy/translators/openai.ts)）：当 `inlineData.mimeType` 以 `image/` 开头时，将消息 `content` 由 `string` 转为 `OpenAIUserContentPart[]`，生成：
+  ```json
+  [
+    { "type": "text", "text": "描述这张图" },
+    { "type": "image_url", "image_url": { "url": "data:image/png;base64,..." } }
+  ]
+  ```
+  文本 part 与图像 part 按原始顺序交织；无图像的消息仍保持 `string` 形式（向后兼容）。
+
+* **Anthropic 协议**（[`src/proxy/translators/anthropic.ts`](file:///d:/programme/antigravity-add-model/src/proxy/translators/anthropic.ts)）：同样将 `content` 转为 `AnthropicContentBlock[]`，生成 `type: "image"` 的 base64 内容块：
+  ```json
+  [
+    { "type": "text", "text": "描述这张图" },
+    { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "..." } }
+  ]
+  ```
+
+**意义**：
+1. 外部视觉模型（GPT-4o、Claude 3.5 Sonnet 等）能真正识别图像内容，而非看到 `[Image: data:...]` 占位文本；
+2. 避免把极长的 base64 字符串当作纯文本输入，从而浪费 Token 或触发上下文超长报错。
+
+> [!NOTE]
+> 视觉能力是否生效仍取决于模型本身：`modelUtils.ts` 的 `detectModelCapabilities()` 通过 `supportsImages` 字段集中检测模型是否支持图像。该转换只改变传输结构，不会强制不支持图像的模型解码图像。
 
 ---
 
@@ -278,10 +313,12 @@ Antigravity 使用 Google 专有的 **Cloud Code 内部 API**（`v1internal:*` �
    /* antigravity-add-model bootstrap */
    import('./proxy/bootstrap.js').catch(function(e){console.error('[agy-proxy] import failed',e);});
    ```
-5. **写入用户设置**：向 `%APPDATA%\Antigravity IDE\User\settings.json` 写入本地代理端点：
+5. **写入用户设置**：向 `%APPDATA%\Antigravity IDE\User\settings.json` 写入本地代理端点（种子值，幂等）：
    ```json
    "jetski.cloudCodeUrl": "http://127.0.0.1:50999/v1internal/xxxxxxx"
    ```
+   > [!NOTE]
+   > 该端点常驻为默认端口 `50999` 的种子值；**代理实际启动时会通过 `syncSettingsJson` 将其自动校正为真实监听端口**（无论是 50999 还是动态回退端口），因此此处只保证键存在即可。
 6. **启动与健康检查**：启动 IDE 并请求 `http://127.0.0.1:50999/health` 验证服务状态。
 
 ---
@@ -409,6 +446,23 @@ Antigravity 使用 Google 专有的 **Cloud Code 内部 API**（`v1internal:*` �
 
 ---
 
+### 坑 10：多自定义模型仅显示 N-1 个（同名 slug 覆写）
+
+* **症状**：`custom_models.json` 中有 N 个模型，但模型选择器中只出现 N-1 个；代理日志显示 `Loaded custom models count: N`（数量正确），注入后 `agentModelSorts[0].groups[0].modelIds` 里的 `extm-*` 数量却是 N-1，呈现“最多显示 N-1/10 个模型”的表象。
+* **根因**：早期 `toSlug()` 以 **`externalModelName || name`** 生成 slug。当两个模型来自不同厂商、但上游模型 id 相同（例如“商汤 V4 Flash”与“BAI V4 Flash”的 `externalModelName` **都是 `deepseek-v4-flash`**）时，二者 slug 相同（`extm-deepseek-v4-fx`）。`fetchAvailableModels` 的 `mergeModels` 以 slug 作为 key 写入 `models` 映射，后者**覆盖**前者，或去重后只剩 1 项，于是第 4 个自定义模型静默丢失。
+* **修复**（[`src/proxy.ts`](file:///d:/programme/antigravity-add-model/src/proxy.ts)）：
+  1. `toSlug()` 改为 **`displayName || externalModelName || name` 优先级**，使同名上游模型的 slug 互不相同且具备描述性。
+  2. `assignUniqueSlugsAndPlaceholders()` 在加载时为每个模型预分配唯一 `_slug`（冲突时追加 `-2` 后缀）与唯一占位符。
+  3. `fetchAvailableModels` 合并时统一使用 `m._slug || toSlug(m)`，**不再重复计算 `toSlug(m)`**，从根源杜绝覆写（见 [`src/proxy.ts`](file:///d:/programme/antigravity-add-model/src/proxy.ts) `mergeModels` 注释）。
+* **排查**：打开 `~/.gemini/antigravity/debug_fetchAvailableModels.json`，对比 `models` 映射与 `agentModelSorts[0].groups[0].modelIds` 中 `extm-*` 的数量即可定位：若某供应商的 `externalModelName` 与另一模型重复，其条目会被去重丢弃。
+
+> [!NOTE]
+> **视觉“10 项”截断 ≠ 数据丢失**。两者独立存在：
+> * 数据侧：同名 slug 覆写导致少注入模型 → 本坑 10 修复；
+> * 视觉侧：前端下拉面板 `POu` 的 `max-h-80`（320px）+ `scrollbar-none` + `overflow-hidden` 会裁剪约 10 项 → 由 `deploy-ide.ps1` 第 6 步的 85vh/600px 高度与滚动补丁解除。部署时务必确认 workbench 补丁已生效（`debug_fetchAvailableModels.json` 中模型齐全但界面仍显示不全时，多为补丁因 IDE 更新失效）。
+
+---
+
 ## 五、验证清单、日志速查与回滚
 
 ### 5.1 部署验证清单
@@ -447,8 +501,11 @@ Antigravity 使用 Google 专有的 **Cloud Code 内部 API**（`v1internal:*` �
 
 ---
 
-## 六、已知限制
+## 六、已知限制与优化
 
-1. **自动更新覆盖**：Antigravity IDE 自动更新会重写 `out\main.js`，更新后重新运行一次 `.\deploy-ide.ps1` 即可恢复（`settings.json` 与 `custom_models.json` 会永久保留）。
-2. **前端选择器数量上限**：前端下拉框渲染上限约为 10 项（官方折叠项 7 个 + 自定义模型约 3 个）。超出数量的模型虽在 `models` 映射中，但不会展示在首屏下拉中。
+1. **自动更新覆盖**：Antigravity IDE 自动更新会重写 `out\main.js` 与渲染层文件，更新后重新运行一次 `.\deploy-ide.ps1` 即可恢复（`settings.json` 与 `custom_models.json` 会永久保留）。
+2. **前端选择器多模型支持（已完美优化）**：早期版本由于前端下拉面板 `POu` 的 `max-h-80`（320px）与 `scrollbar-none` 限制，导致第 4 个及以后的自定义模型被视觉遮挡。当前部署流程会自动对 `workbench.desktop.main.js` 应用高度与滚动补丁（扩展至 `min(85vh, 600px)` 并启用平滑滚动条，同步更新 `product.json` 校验哈希），已支持同时配置 20+ 个自定义模型无限制浏览与选用。**注意**：IDE 自动更新会重写该文件导致补丁失效，更新后需重新运行 `.\deploy-ide.ps1`。
 3. **名称关键字过滤**：自定义模型的 `displayName` 应尽量避免包含 `flash`/`lite`/`pro`/`low`/`high`/`tier` 等词汇，防止命中国方分级过滤规则。
+4. **同名上游模型 id**：不同提供商的模型若 `externalModelName` 相同，`toSlug()` 已按 `displayName` 优先生成互不相同的 slug（见 [坑 10](#坑-10多自定义模型仅显示-n-1-个同名-slug-覆写)），但**同一配置内 `displayName` 不宜重复**，否则仍会因 slug 冲突而丢失模型。
+5. **图像输入取决于模型视觉能力**：代理会正确构造 `image_url` / `type: "image"` 结构（见 [2.7 节](#27-多模态视觉vision-输入处理)），但图像能否被“看见”仍取决于所用模型是否支持视觉。对不支持图像的模型（如部分 DeepSeek、Llama 文本模型），图像内容块可能被上游忽略或报错。
+

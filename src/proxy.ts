@@ -24,6 +24,7 @@ export interface CustomModel {
   allowUnauthorized?: boolean;
   encrypted?: boolean;
   _slug?: string;
+  _placeholderId?: string;
   timeout?: number;
   maxRetries?: number;
 }
@@ -68,6 +69,10 @@ import { detectModelCapabilities, detectModelCapabilitiesByName } from './proxy/
 // Provider translator registry (auto-discovers translators from proxy/translators/)
 import * as registry from './proxy/registry';
 
+// Runtime port ↔ settings.json synchronization (keeps jetski.cloudCodeUrl in sync)
+import { syncActivePort, syncSettingsJson } from './proxy/settingsSync';
+export { syncActivePort, syncSettingsJson, getSettingsPath, getActivePortPath } from './proxy/settingsSync';
+
 // Dynamic imports (stays require for Electron-specific modules)
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const cryptoStore = require('./cryptoStore');
@@ -75,6 +80,7 @@ const cryptoStore = require('./cryptoStore');
 // ─── Model Helpers ────────────────────────────────────────────────────────
 
 function generateModelPlaceholderId(model: CustomModel): string {
+  if (model._placeholderId) return model._placeholderId;
   const input = (model.displayName || model.name || 'custom-model').toLowerCase();
   let hash = 5381;
   for (let i = 0; i < input.length; i++) {
@@ -91,14 +97,18 @@ function getCustomModelsPath(): string {
 }
 
 function toSlug(model: CustomModel): string {
+  if (model._slug) return model._slug;
   // Tier keywords (flash/pro/low/medium/high/tier/lite) in model IDs pollute the
   // LS tier-family grouping and break the official Low/Medium/High submenu.
   // Substitute them so injected IDs never match tier patterns. `flash` is
   // rewritten to `flsh` then to `fx` so the sanitized form itself never
   // matches tier detection either.
+  // Prioritize displayName so models targeting the same upstream model id
+  // (e.g. deepseek-v4-flash from different providers) generate distinct, descriptive slugs.
+  const rawName = model.displayName || model.externalModelName || model.name || 'custom-model';
   return (
     'extm-' +
-    (model.externalModelName || model.name)
+    rawName
       .replace(/^models\//, '')
       .replace(/[^a-zA-Z0-9]+/g, '-')
       .replace(/^-+|-+$/g, '')
@@ -112,6 +122,40 @@ function toSlug(model: CustomModel): string {
       .replace(/high/g, 'h1gh')
       .replace(/pro/g, 'pr0')
   );
+}
+
+function assignUniqueSlugsAndPlaceholders(models: CustomModel[]): CustomModel[] {
+  const usedSlugs = new Set<string>();
+  const usedPlaceholders = new Set<string>();
+
+  for (let i = 0; i < models.length; i++) {
+    const m = models[i];
+    delete m._slug;
+    delete m._placeholderId;
+
+    const baseSlug = toSlug(m);
+    let uniqueSlug = baseSlug;
+    let counter = 2;
+    while (usedSlugs.has(uniqueSlug)) {
+      uniqueSlug = `${baseSlug}-${counter}`;
+      counter++;
+    }
+    usedSlugs.add(uniqueSlug);
+    m._slug = uniqueSlug;
+
+    let placeholder = generateModelPlaceholderId(m);
+    let pCounter = 1;
+    while (usedPlaceholders.has(placeholder)) {
+      const match = placeholder.match(/\d+$/);
+      const currNum = match ? parseInt(match[0], 10) : 400;
+      placeholder = `MODEL_PLACEHOLDER_M${((currNum - 400 + pCounter) % 200) + 400}`;
+      pCounter++;
+    }
+    usedPlaceholders.add(placeholder);
+    m._placeholderId = placeholder;
+  }
+
+  return models;
 }
 
 /**
@@ -182,7 +226,7 @@ function loadCustomModels(): CustomModel[] {
     } catch (e) {
       log.error('[Proxy] Failed to write default custom_models.json', e);
     }
-    return cryptoStore.decryptModels(defaultModels.models);
+    return assignUniqueSlugsAndPlaceholders(cryptoStore.decryptModels(defaultModels.models));
   }
 
   try {
@@ -206,7 +250,7 @@ function loadCustomModels(): CustomModel[] {
       try {
         fs.writeFileSync(filePath, JSON.stringify({ models: encryptedModels }, null, 2), 'utf-8');
         log.info('[Proxy] Successfully migrated custom_models.json to encrypted format.');
-        return cryptoStore.decryptModels(encryptedModels);
+        return assignUniqueSlugsAndPlaceholders(cryptoStore.decryptModels(encryptedModels));
       } catch (err) {
         log.error('[Proxy] Failed to write encrypted custom_models.json during migration:', err);
       }
@@ -230,7 +274,7 @@ function loadCustomModels(): CustomModel[] {
       );
     }
 
-    return validModels;
+    return assignUniqueSlugsAndPlaceholders(validModels);
   } catch (e) {
     log.error('[Proxy] Failed to parse custom_models.json', e);
     return [];
@@ -1144,7 +1188,12 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
               } else if (target && typeof target === 'object') {
                 const result = { ...(target as Record<string, unknown>) };
                 customModels.forEach((m) => {
-                  const slug = toSlug(m);
+                  // Always use the unique slug pre-assigned by
+                  // assignUniqueSlugsAndPlaceholders(). Recomputing toSlug()
+                  // here could collide when two models share the same upstream
+                  // id / displayName, silently dropping the latter from the
+                  // picker (only N-1 custom models shown).
+                  const slug = m._slug || toSlug(m);
                   const cap = detectModelCapabilities(m, true);
                   const entry: Record<string, unknown> = {
                     displayName: sanitizeDisplayName(m.displayName),
@@ -1257,7 +1306,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
             if (!merged) {
               const modelsMap: Record<string, unknown> = {};
               customModels.forEach((m) => {
-                const slug = toSlug(m);
+                const slug = m._slug || toSlug(m);
                 modelsMap[slug] = {
                   displayName: sanitizeDisplayName(m.displayName),
                   name: slug,
@@ -1276,12 +1325,9 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
 
             // Add custom models to the end of groups[0].modelIds of each sort.
             // With the complete field entries (tagTitle, modelExperiments, etc.)
-            // the official tiered submenu rendering no longer breaks — the
-            // missing fields were the root cause of the NaN crash that caused
-            // the submenu to be obscured. Reverse the order so the "last"
-            // custom models (which were previously missing) appear first.
+            // the official tiered submenu rendering no longer breaks.
+            // Keep the natural user-defined configuration order from custom_models.json.
             const customSlugs = customModels.map((m) => m._slug || toSlug(m)).filter(Boolean) as string[];
-            customSlugs.reverse();
             if (customSlugs.length > 0 && googleJson.agentModelSorts && Array.isArray(googleJson.agentModelSorts)) {
               (googleJson.agentModelSorts as { groups?: { modelIds?: string[] }[] }[]).forEach((sort) => {
                 if (sort.groups && Array.isArray(sort.groups) && sort.groups.length > 0) {
@@ -1488,8 +1534,16 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
         if (modelName) {
           const customModels = loadCustomModels();
           const matchedCustomModel = customModels.find((m) => {
-            const enumName = generateModelPlaceholderId(m);
-            return m.name === modelName || toSlug(m) === modelName || enumName === modelName || enumName === modelId;
+            const enumName = m._placeholderId || generateModelPlaceholderId(m);
+            const slug = m._slug || toSlug(m);
+            return (
+              m.name === modelName ||
+              slug === modelName ||
+              enumName === modelName ||
+              enumName === modelId ||
+              'models/' + slug === modelName ||
+              'models/' + enumName === modelName
+            );
           });
           if (matchedCustomModel) {
             log.info(
@@ -1520,11 +1574,13 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
       const matchedModelName = isGenerate ? generateMatch![1] : streamMatch![1];
       const customModels = loadCustomModels();
       const matchedCustomModel = customModels.find((m) => {
-        const enumName = generateModelPlaceholderId(m);
+        const enumName = m._placeholderId || generateModelPlaceholderId(m);
+        const slug = m._slug || toSlug(m);
         return (
           m.name === matchedModelName ||
-          toSlug(m) === matchedModelName ||
+          slug === matchedModelName ||
           enumName === matchedModelName ||
+          'models/' + slug === matchedModelName ||
           'models/' + enumName === matchedModelName
         );
       });
@@ -1565,6 +1621,11 @@ export function startProxy(): Promise<number> {
       server!.listen(port, '127.0.0.1', () => {
         proxyPort = (server!.address() as import('net').AddressInfo).port;
         log.info(`[Proxy] Server listening on http://127.0.0.1:${proxyPort}`);
+        // Keep the LS endpoint (jetski.cloudCodeUrl) and active_port marker in
+        // sync with the port we actually bound — this handles both the default
+        // 50999 and any dynamic fallback port the OS assigned.
+        syncSettingsJson(proxyPort);
+        syncActivePort(proxyPort);
         resolve(proxyPort);
       });
     }

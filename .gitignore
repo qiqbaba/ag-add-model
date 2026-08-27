@@ -14,7 +14,5 @@ Thumbs.db
 # Development artifacts
 scratch/
 
-# Compiled binary mocks
-dist/__mocks__/
-dist/*.test.js
-dist/**/*.test.js
+# Compiled output (TypeScript build artifacts)
+dist/

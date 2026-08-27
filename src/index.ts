@@ -27,4 +27,6 @@ export {
 
 export { detectModelCapabilities, detectModelCapabilitiesByName, type ModelCapabilities } from './proxy/modelUtils';
 
+export { syncSettingsJson, syncActivePort, getSettingsPath, getActivePortPath } from './proxy/settingsSync';
+
 export * from './proxy/registry';

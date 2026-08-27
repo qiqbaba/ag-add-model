@@ -197,3 +197,86 @@ describe('parseRetryAfter', () => {
     expect(parseRetryAfter({ 'retry-after': '' })).toBe(0);
   });
 });
+
+describe('multi-model agentModelSorts merge logic', () => {
+  it('preserves natural user-defined configuration order for large numbers of models', () => {
+    const customModels = Array.from({ length: 15 }, (_, i) => ({
+      name: `models/custom-model-${i + 1}`,
+      displayName: `Custom Model ${i + 1}`,
+      externalModelName: `custom-model-${i + 1}`,
+      _slug: `custom-custom-model-${i + 1}`,
+    }));
+
+    const googleJson = {
+      models: {
+        'gemini-3.7-flash-high': { displayName: 'Gemini 3.7 Flash (High)' },
+      },
+      agentModelSorts: [
+        {
+          displayName: 'Recommended',
+          groups: [{ modelIds: ['gemini-3.7-flash-high'] }],
+        },
+      ],
+    };
+
+    const customSlugs = customModels.map((m) => m._slug || toSlug(m)).filter(Boolean) as string[];
+
+    // Ensure order is not reversed and all 15 models are preserved
+    if (customSlugs.length > 0 && googleJson.agentModelSorts && Array.isArray(googleJson.agentModelSorts)) {
+      googleJson.agentModelSorts.forEach((sort) => {
+        if (sort.groups && Array.isArray(sort.groups) && sort.groups.length > 0) {
+          const g0 = sort.groups[0];
+          if (Array.isArray(g0.modelIds)) {
+            customSlugs.forEach((slug) => {
+              if (!g0.modelIds.includes(slug)) {
+                g0.modelIds.push(slug);
+              }
+            });
+          }
+        }
+      });
+    }
+
+    const g0ModelIds = googleJson.agentModelSorts[0].groups[0].modelIds;
+    expect(g0ModelIds.length).toBe(16); // 1 official + 15 custom
+    expect(g0ModelIds[0]).toBe('gemini-3.7-flash-high');
+    expect(g0ModelIds[1]).toBe('custom-custom-model-1');
+    expect(g0ModelIds[2]).toBe('custom-custom-model-2');
+    expect(g0ModelIds[15]).toBe('custom-custom-model-15');
+  });
+
+  it('generates distinct slugs for models sharing the same externalModelName but different displayName', () => {
+    function toSlugUpdated(model: { displayName?: string; externalModelName?: string; name?: string; _slug?: string }): string {
+      if (model._slug) return model._slug;
+      const rawName = model.displayName || model.externalModelName || model.name || 'custom-model';
+      return (
+        'extm-' +
+        rawName
+          .replace(/^models\//, '')
+          .replace(/[^a-zA-Z0-9]+/g, '-')
+          .replace(/^-+|-+$/g, '')
+          .toLowerCase()
+      );
+    }
+
+    const modelA = {
+      name: 'models/deepseek-v4-flash',
+      displayName: 'DeepSeek V4 Flash',
+      externalModelName: 'deepseek-v4-flash',
+    };
+    const modelB = {
+      name: 'models/deepseek-v4-flash',
+      displayName: 'DeepSeek V4 Flash 0731',
+      externalModelName: 'deepseek-v4-flash',
+    };
+
+    const slugA = toSlugUpdated(modelA);
+    const slugB = toSlugUpdated(modelB);
+
+    expect(slugA).not.toBe(slugB);
+    expect(slugA).toBe('extm-deepseek-v4-flash');
+    expect(slugB).toBe('extm-deepseek-v4-flash-0731');
+  });
+});
+
+

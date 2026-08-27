@@ -153,6 +153,36 @@ describe('mapGeminiToOpenAI', () => {
     expect(result.messages[1].role).toBe('assistant');
     expect(result.messages[2].role).toBe('user');
   });
+
+  it('should convert image inlineData to image_url content part', () => {
+    const body = {
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { text: 'Describe this image' },
+            { inlineData: { mimeType: 'image/png', data: 'AAAA' } },
+          ],
+        },
+      ],
+    };
+    const result = mapGeminiToOpenAI(body, 'gpt-4o');
+    const msg = result.messages[0];
+    expect(Array.isArray(msg.content)).toBe(true);
+    expect(msg.content).toEqual([
+      { type: 'text', text: 'Describe this image' },
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+    ]);
+  });
+
+  it('should keep user content as string when no image present', () => {
+    const body = {
+      contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+    };
+    const result = mapGeminiToOpenAI(body, 'gpt-4o');
+    expect(result.messages[0].content).toBe('Hello');
+    expect(typeof result.messages[0].content).toBe('string');
+  });
 });
 
 // ─── mapOpenAIToGemini ─────────────────────────────────────────────────────
@@ -209,6 +239,56 @@ describe('mapOpenAIToGemini', () => {
     expect(result.candidates[0].finishReason).toBe('TOOL_CALL');
     const fcParts = result.candidates[0].content.parts.filter((p) => p.functionCall);
     expect(fcParts.length).toBeGreaterThan(0);
+  });
+
+  it('should register DSML tool calls for response round-trip', () => {
+    const res = {
+      choices: [
+        {
+          message: {
+            content:
+              '<DSML|invoke name="run_command">\n<DSML|parameter name="CommandLine" string="true">ls</DSML|parameter>\n<DSML|parameter name="Cwd" string="true">/repo</DSML|parameter>\n</DSML|invoke>',
+          },
+          finish_reason: 'stop',
+        },
+      ],
+      usage: { prompt_tokens: 5, completion_tokens: 10, total_tokens: 15 },
+    };
+    const result = mapOpenAIToGemini(res, 'deepseek-v4');
+    const fcParts = result.candidates[0].content.parts.filter((p) => p.functionCall);
+    expect(fcParts.length).toBe(1);
+    expect(fcParts[0].functionCall!.name).toBe('list_dir');
+    expect(fcParts[0].functionCall!.id).toBeDefined();
+    const id = fcParts[0].functionCall!.id!;
+    expect(shared.modelToolCallIds.get('deepseek-v4')?.['run_command']).toBe(id);
+    expect(shared.translatedToolCalls.get(id)?.originalName).toBe('run_command');
+    expect(shared.translatedToolCalls.get(id)?.translatedName).toBe('list_dir');
+  });
+
+  it('should preserve reasoning_content alongside tool_calls', () => {
+    const res = {
+      choices: [
+        {
+          message: {
+            reasoning_content: 'thinking...',
+            content: null,
+            tool_calls: [
+              {
+                id: 'call_1',
+                type: 'function',
+                function: { name: 'run_command', arguments: '{"CommandLine":"ls","Cwd":"/repo"}' },
+              },
+            ],
+          },
+          finish_reason: 'tool_calls',
+        },
+      ],
+      usage: { prompt_tokens: 5, completion_tokens: 10, total_tokens: 15 },
+    };
+    const result = mapOpenAIToGemini(res, 'deepseek-v4');
+    const parts = result.candidates[0].content.parts;
+    expect(parts.some((p) => p.thought && p.text === 'thinking...')).toBe(true);
+    expect(parts.some((p) => p.functionCall)).toBe(true);
   });
 
   it('should include reasoning_content as thought part', () => {
@@ -271,6 +351,18 @@ describe('mapOpenAIChunkToGemini', () => {
     const result = mapOpenAIChunkToGemini(chunk, 'deepseek-v4');
     expect(result).not.toBeNull();
     expect(result!.content.parts[0]).toEqual({ text: 'thinking...', thought: true });
+  });
+
+  it('should keep content when reasoning and content arrive in the same chunk', () => {
+    const chunk = {
+      id: 'stream_mixed',
+      choices: [{ delta: { reasoning_content: 'thinking...', content: 'answer' }, index: 0 }],
+    };
+    const result = mapOpenAIChunkToGemini(chunk, 'deepseek-v4');
+    expect(result).not.toBeNull();
+    const parts = result!.content.parts;
+    expect(parts.some((p) => p.thought && p.text === 'thinking...')).toBe(true);
+    expect(parts.some((p) => p.text === 'answer')).toBe(true);
   });
 
   it('should accumulate and emit tool calls on finish_reason tool_calls', () => {

@@ -1,3 +1,7 @@
+本方案只对反重力ide测试有效，反重力未测试，效果未知。
+
+项目是在[vahapogut/antigravity-add-model](https://github.com/vahapogut/antigravity-add-model)基础上进行的修改。
+
 # Antigravity 自定义模型启用器
 
 > **Antigravity IDE（VS Code Fork）部署方案**
@@ -28,7 +32,7 @@
 2. 将 `main.js`、语言服务器二进制备份到 `resources\app_backup\`（含一键 `rollback.ps1`）
 3. 将代理运行时文件部署到 `resources\app\out\proxy\` 并安装 `electron-log`
 4. 在 `out\main.js` 顶部注入 ESM 动态 `import('./proxy/bootstrap.js')`
-5. 写入 `jetski.cloudCodeUrl` → 本地代理 URL（幂等）
+5. 写入 `jetski.cloudCodeUrl` → 本地代理 URL（幂等，代理启动时自动校正为实际端口）
 6. （可选）对语言服务器二进制打补丁 — 用 `-SkipBinaryPatch` 跳过（此架构下非必需）
 7. 启动 IDE 并进行健康检查
 
@@ -82,6 +86,9 @@ npx tsc
 
 > [!NOTE]
 > 对于 **Google AI Studio**，提供完整端点 URL 或仅基础 `https://generativelanguage.googleapis.com/v1beta/models/`。代理根据请求是否为流式自动判断 `streamGenerateContent` 还是 `generateContent`。
+
+> [!NOTE]
+> **多模态 / 视觉（Vision）支持**：代理会将聊天中粘贴、或 Agent 自动截图并发送的图像（Gemini 的 `inlineData` 图像 part）正确翻译为目标提供商的标准结构 — OpenAI 的 `image_url` 内容块、Anthropic 的 `type: "image"` 内容块，使 GPT-4o、Claude 3.5 Sonnet 等视觉模型真正“看见”图像（而非退化为 `[Image: data:...]` 占位文本）。能否解码图像仍取决于所用模型本身是否支持视觉。
 
 ---
 
@@ -265,7 +272,9 @@ Antigravity IDE 自动更新会覆盖已注入的文件（`out\main.js`、`out\p
 ## 故障排查
 
 ### 端口冲突
-若端口 `50999` 被占用，代理自动回退到随机端口。查看 `~/.gemini/antigravity/active_port`。
+若端口 `50999` 被占用，代理自动回退到随机端口，并**自动同步**：
+- 将实际端口写入 `~/.gemini/antigravity/active_port`；
+- 将用户 `settings.json` 中的 `jetski.cloudCodeUrl` 精确更新为 `http://127.0.0.1:<actual_port>/v1internal/xxxxxxx`（保留你的注释与排版），确保 Language Server 始终连接到代理实际监听端口，无需手动修改。端口恢复为 `50999` 时也会自动同步回来。
 
 ### 语言服务器崩溃
 60 秒内最多自动重启 3 次。查看日志：
@@ -282,8 +291,9 @@ Antigravity IDE 自动更新会覆盖已注入的文件（`out\main.js`、`out\p
 2. 检查 `apiUrl` 是否正确
 3. 添加模型后重启 Antigravity
 4. 用**测试连接**按钮验证端点可达性
-5. 若自定义模型超过 3 个，注意前端下拉列表仅渲染约 10 项，多余模型不会出现在下拉中（见 DEPLOY 文档“已知限制”）
-6. 若模型显示名称含 `flash`/`lite`/`low`/`medium`/`high`/`pro`/`tier` 等分级词汇，可能被前端过滤，请改名后重试
+5. 若界面显示的模型比配置数量少 1 个以上：多为**同名 slug 覆写**（两个模型 `externalModelName` 相同），已由 `toSlug()` 按 `displayName` 优先解决（见 ARCHITECTURE 文档“坑 10”）。
+6. 若模型已注入配置齐全但仍超过约 10 项显示不全：为前端 `max-h-80`（320px）高度截断，需确保 `deploy-ide.ps1` 第 6 步的 workbench 高度/滚动补丁已生效（IDE 更新会使其失效），重跑部署即可。
+7. 若模型显示名称含 `flash`/`lite`/`low`/`medium`/`high`/`pro`/`tier` 等分级词汇，可能被前端过滤，请改名后重试
 
 ### 连接超时
 1. 检查提供商 API 是否可达（`curl -I <apiUrl>`）

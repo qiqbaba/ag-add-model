@@ -133,6 +133,37 @@ describe('mapGeminiToAnthropic', () => {
     expect(result.tools![0].name).toBe('get_weather');
     expect(result.tools![0].input_schema).toBeDefined();
   });
+
+  it('should convert image inlineData to image content block', () => {
+    const body = {
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { text: 'Describe this image' },
+            { inlineData: { mimeType: 'image/png', data: 'AAAA' } },
+          ],
+        },
+      ],
+    };
+    const result = mapGeminiToAnthropic(body, 'claude-3-5-sonnet-latest');
+    const content = result.messages[0].content as Array<Record<string, unknown>>;
+    expect(Array.isArray(content)).toBe(true);
+    expect(content[0]).toEqual({ type: 'text', text: 'Describe this image' });
+    expect(content[1]).toEqual({
+      type: 'image',
+      source: { type: 'base64', media_type: 'image/png', data: 'AAAA' },
+    });
+  });
+
+  it('should keep user content as string when no image present', () => {
+    const body = {
+      contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+    };
+    const result = mapGeminiToAnthropic(body, 'claude-3-5-sonnet-latest');
+    expect(result.messages[0].content).toBe('Hello');
+    expect(typeof result.messages[0].content).toBe('string');
+  });
 });
 
 // ─── mapAnthropicToGemini ──────────────────────────────────────────────────
