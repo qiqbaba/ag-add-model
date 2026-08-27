@@ -33,8 +33,10 @@ const DEEPSEEK_PATTERN = /deepseek/i;
 const CLAUDE_PATTERN = /claude|opus|sonnet/i;
 const CLAUDE_THINKING_PATTERN = /opus-4|sonnet-4|claude-4|claude-3-5|claude-3-7/i;
 const THINKING_MODEL_PATTERN = /opus-4|sonnet-4|claude-4/i;
-const IMAGE_SUPPORT_PATTERN = /gpt-4o|gpt-4-turbo|claude|gemini|vision|llava|qwenvl|pixtral|yi-vision|cogvlm|kimi|moonshot/i;
-const NO_IMAGE_PATTERN = /deepseek(?!.*vision)|llama(?!.*vision)|mixtral(?!.*vision)|mistral(?!.*pixtral)|codestral|qwen(?!.*vl)/i;
+const IMAGE_SUPPORT_PATTERN =
+  /gpt-4o|gpt-4-turbo|claude|gemini|vision|llava|qwenvl|pixtral|yi-vision|cogvlm|kimi|moonshot/i;
+const NO_IMAGE_PATTERN =
+  /deepseek(?!.*vision)|llama(?!.*vision)|mixtral(?!.*vision)|mistral(?!.*pixtral)|codestral|qwen(?!.*vl)/i;
 
 /**
  * Detects model capabilities from a custom model config object.

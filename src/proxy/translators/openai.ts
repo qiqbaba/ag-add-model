@@ -280,7 +280,10 @@ export function mapGeminiToOpenAI(geminiBody: GeminiRequestBody, modelName: stri
                   const url = new URL(fd.fileUri);
                   if (url.protocol === 'file:') {
                     const fs = require('fs');
-                    const fileContent = fs.readFileSync(url.pathname.replace(/^\//, '').replace(/\//g, path.sep), 'utf-8');
+                    const fileContent = fs.readFileSync(
+                      url.pathname.replace(/^\//, '').replace(/\//g, path.sep),
+                      'utf-8',
+                    );
                     partsContent.push(`[File content from ${fd.fileUri}]:\n${fileContent}`);
                   } else {
                     partsContent.push(`[File reference: ${fd.fileUri} (${fd.mimeType})]`);

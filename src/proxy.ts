@@ -335,7 +335,10 @@ function proxyToGoogle(req: http.IncomingMessage, res: http.ServerResponse, reqB
 
 // ─── File Data Resolver ────────────────────────────────────────────────────
 
-async function resolveFileData(body: GeminiRequestBody, reqHeaders: Record<string, string | string[] | undefined>): Promise<void> {
+async function resolveFileData(
+  body: GeminiRequestBody,
+  reqHeaders: Record<string, string | string[] | undefined>,
+): Promise<void> {
   const contents = body.contents;
   if (!contents) return;
   const authHeader = (reqHeaders['authorization'] || reqHeaders['Authorization'] || '') as string;
@@ -346,7 +349,8 @@ async function resolveFileData(body: GeminiRequestBody, reqHeaders: Record<strin
       const fd = p.fileData as { mimeType?: string; fileUri?: string } | undefined;
       if (!fd?.fileUri) continue;
       try {
-        const uri = fd.fileUri; let fileContent = '';
+        const uri = fd.fileUri;
+        let fileContent = '';
         if (uri.startsWith('file://')) {
           const fp = uri.replace('file://', '').replace(/\//g, path.sep);
           if (fs.existsSync(fp)) fileContent = fs.readFileSync(fp, 'utf-8');
@@ -356,7 +360,9 @@ async function resolveFileData(body: GeminiRequestBody, reqHeaders: Record<strin
         if (fileContent) {
           (item.parts[i] as Record<string, unknown>) = { text: '[File content]:\n\n' + fileContent };
         }
-      } catch (e) { log.warn('[Proxy] File resolve failed:', (e as Error).message); }
+      } catch (e) {
+        log.warn('[Proxy] File resolve failed:', (e as Error).message);
+      }
     }
   }
 }
@@ -364,13 +370,27 @@ async function resolveFileData(body: GeminiRequestBody, reqHeaders: Record<strin
 function downloadFileContent(url: string, authHeader: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
-    (u.protocol === 'https:' ? https : http).request({
-      hostname: u.hostname, path: u.pathname + u.search,
-      method: 'GET', headers: { 'Authorization': authHeader }, timeout: 30000,
-    }, (res) => {
-      if (res.statusCode !== 200) { reject(new Error('HTTP ' + res.statusCode)); return; }
-      let d = ''; res.on('data', (c: Buffer) => d += c.toString()); res.on('end', () => resolve(d));
-    }).on('error', reject).end();
+    (u.protocol === 'https:' ? https : http)
+      .request(
+        {
+          hostname: u.hostname,
+          path: u.pathname + u.search,
+          method: 'GET',
+          headers: { Authorization: authHeader },
+          timeout: 30000,
+        },
+        (res) => {
+          if (res.statusCode !== 200) {
+            reject(new Error('HTTP ' + res.statusCode));
+            return;
+          }
+          let d = '';
+          res.on('data', (c: Buffer) => (d += c.toString()));
+          res.on('end', () => resolve(d));
+        },
+      )
+      .on('error', reject)
+      .end();
   });
 }
 
@@ -477,12 +497,17 @@ function handleCustomModelRequest(
       // Check for API errors BEFORE writing streaming headers
       if (apiRes.statusCode! >= 400) {
         let errorBody = '';
-        apiRes.on('data', (chunk: Buffer) => errorBody += chunk.toString());
+        apiRes.on('data', (chunk: Buffer) => (errorBody += chunk.toString()));
         apiRes.on('end', () => {
-          log.error(`[Proxy] Stream API error (${apiRes.statusCode}) for ${model.name}: ${errorBody.substring(0, 300)}`);
+          log.error(
+            `[Proxy] Stream API error (${apiRes.statusCode}) for ${model.name}: ${errorBody.substring(0, 300)}`,
+          );
           if (retryCount < MAX_RETRIES) {
             log.warn(`[Proxy] Stream error, retrying (${retryCount + 1}/${MAX_RETRIES})...`);
-            setTimeout(() => handleCustomModelRequest(res, model, geminiBody, isStream, retryCount + 1), 1000 * (retryCount + 1));
+            setTimeout(
+              () => handleCustomModelRequest(res, model, geminiBody, isStream, retryCount + 1),
+              1000 * (retryCount + 1),
+            );
             return;
           }
           res.writeHead(apiRes.statusCode!, { 'Content-Type': 'application/json' });
@@ -709,7 +734,7 @@ function handleCustomModelRequest(
 // ─── Protobuf Utilities ────────────────────────────────────────────────────
 
 interface ProtoField {
-  tag: number;        // full tag (field_number << 3 | wire_type)
+  tag: number; // full tag (field_number << 3 | wire_type)
   wireType: number;
   fieldNum: number;
   value: number | Buffer | ProtoField[];
@@ -764,7 +789,14 @@ function parseProto(buf: Buffer, offset: number, end: number): ProtoField[] {
       const len = lenVarint.value;
       const children = parseProto(buf, pos, pos + len);
       const hasChildren = children.length > 0;
-      fields.push({ tag, wireType, fieldNum, value: hasChildren ? children : buf.subarray(pos, pos + len), start, end: pos + len });
+      fields.push({
+        tag,
+        wireType,
+        fieldNum,
+        value: hasChildren ? children : buf.subarray(pos, pos + len),
+        start,
+        end: pos + len,
+      });
       pos += len;
     } else if (wireType === 1) {
       fields.push({ tag, wireType, fieldNum, value: buf.subarray(pos, pos + 8), start, end: pos + 8 });
@@ -856,11 +888,7 @@ function encodeModelEntryForGetModels(
 
 // ─── GetAvailableModels Proxy Handler ───────────────────────────────────────
 
-function handleGetAvailableModelsProxy(
-  res: http.ServerResponse,
-  reqBody: Buffer,
-  lsUrl: string,
-): void {
+function handleGetAvailableModelsProxy(res: http.ServerResponse, reqBody: Buffer, lsUrl: string): void {
   const lsParsed = new URL(lsUrl);
   const client = lsParsed.protocol === 'https:' ? https : http;
 
@@ -871,7 +899,7 @@ function handleGetAvailableModelsProxy(
     path: lsParsed.pathname + lsParsed.search,
     headers: {
       'Content-Type': 'application/grpc-web+proto',
-      'Accept': 'application/grpc-web+proto',
+      Accept: 'application/grpc-web+proto',
       'Content-Length': String(reqBody.length),
     },
     rejectUnauthorized: false,
@@ -895,26 +923,18 @@ function handleGetAvailableModelsProxy(
             const modelTag = findModelEntryFieldTag(parsed);
 
             if (modelTag !== null) {
-              const sampleEntry = parsed.find(
-                (f) => f.tag === modelTag && Array.isArray(f.value),
-              );
+              const sampleEntry = parsed.find((f) => f.tag === modelTag && Array.isArray(f.value));
               if (sampleEntry && Array.isArray(sampleEntry.value)) {
                 const fieldMapping = extractFieldMapping(sampleEntry.value);
                 const newParts: Buffer[] = [msgBody];
 
                 for (const m of customModels) {
                   const placeholderId = generateModelPlaceholderId(m);
-                  const entry = encodeModelEntryForGetModels(
-                    'models/' + placeholderId,
-                    m.displayName,
-                    fieldMapping,
-                  );
+                  const entry = encodeModelEntryForGetModels('models/' + placeholderId, m.displayName, fieldMapping);
                   const tagBuf = encodeVarint(modelTag);
                   const lenBuf = encodeVarint(entry.length);
                   newParts.push(tagBuf, lenBuf, entry);
-                  log.info(
-                    `[Proxy] Injected into GetAvailableModels: ${m.displayName} => ${placeholderId}`,
-                  );
+                  log.info(`[Proxy] Injected into GetAvailableModels: ${m.displayName} => ${placeholderId}`);
                 }
 
                 const newMsgBody = Buffer.concat(newParts);
@@ -1239,10 +1259,10 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
               customModels.forEach((m) => {
                 const slug = toSlug(m);
                 modelsMap[slug] = {
-                displayName: sanitizeDisplayName(m.displayName),
-                name: slug,
-                recommended: true,
-                maxTokens: 1048576,
+                  displayName: sanitizeDisplayName(m.displayName),
+                  name: slug,
+                  recommended: true,
+                  maxTokens: 1048576,
                   maxOutputTokens: 4096,
                   tokenizerType: 'LLAMA_WITH_SPECIAL',
                   model: generateModelPlaceholderId(m),
@@ -1260,13 +1280,9 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
             // missing fields were the root cause of the NaN crash that caused
             // the submenu to be obscured. Reverse the order so the "last"
             // custom models (which were previously missing) appear first.
-            const customSlugs = customModels.map((m) => (m._slug || toSlug(m))).filter(Boolean) as string[];
+            const customSlugs = customModels.map((m) => m._slug || toSlug(m)).filter(Boolean) as string[];
             customSlugs.reverse();
-            if (
-              customSlugs.length > 0 &&
-              googleJson.agentModelSorts &&
-              Array.isArray(googleJson.agentModelSorts)
-            ) {
+            if (customSlugs.length > 0 && googleJson.agentModelSorts && Array.isArray(googleJson.agentModelSorts)) {
               (googleJson.agentModelSorts as { groups?: { modelIds?: string[] }[] }[]).forEach((sort) => {
                 if (sort.groups && Array.isArray(sort.groups) && sort.groups.length > 0) {
                   const g0 = sort.groups[0];

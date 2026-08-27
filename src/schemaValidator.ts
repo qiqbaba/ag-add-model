@@ -103,7 +103,23 @@ export function validateCustomModel(model: unknown): ValidationResult {
   // Provider transport hint (optional). Unknown providers fall back to the
   // OpenAI-compatible translator automatically (see proxy/registry.ts).
   // Use "anthropic" as provider for Anthropic-style APIs.
-  const knownProviders = ['openai', 'anthropic', 'google', 'ollama', 'custom', 'openrouter', 'deepseek', 'groq', 'mistral', 'cerebras', 'kimi', 'fireworks', 'lmstudio', 'llamacpp', 'nvidia'];
+  const knownProviders = [
+    'openai',
+    'anthropic',
+    'google',
+    'ollama',
+    'custom',
+    'openrouter',
+    'deepseek',
+    'groq',
+    'mistral',
+    'cerebras',
+    'kimi',
+    'fireworks',
+    'lmstudio',
+    'llamacpp',
+    'nvidia',
+  ];
   if (!knownProviders.includes(provider)) {
     console.warn(`[Validator] Unknown provider "${provider}" — treating as OpenAI-compatible`);
   }

@@ -242,9 +242,27 @@ export function mapGeminiToAnthropic(geminiBody: GeminiRequestBody, modelName: s
           if (item.parts) {
             const partsContent: string[] = [];
             for (const p of item.parts) {
-              if (p.text) { partsContent.push(p.text); }
-              else if ((p as any).fileData) { const fd = (p as any).fileData; try { const url = new URL(fd.fileUri); if (url.protocol === 'file:') { const fs = require('fs'); partsContent.push(`[File:\n${fs.readFileSync(url.pathname.replace(/^\//, '').replace(/\//g, path.sep), 'utf-8')}\n]`); } else { partsContent.push(`[File: ${fd.fileUri} (${fd.mimeType})]`); } } catch { partsContent.push(`[File: ${fd.fileUri} (${fd.mimeType})]`); } }
-              else if ((p as any).inlineData) { const id = (p as any).inlineData; partsContent.push(`[${id.mimeType}: ${id.data}]`); }
+              if (p.text) {
+                partsContent.push(p.text);
+              } else if ((p as any).fileData) {
+                const fd = (p as any).fileData;
+                try {
+                  const url = new URL(fd.fileUri);
+                  if (url.protocol === 'file:') {
+                    const fs = require('fs');
+                    partsContent.push(
+                      `[File:\n${fs.readFileSync(url.pathname.replace(/^\//, '').replace(/\//g, path.sep), 'utf-8')}\n]`,
+                    );
+                  } else {
+                    partsContent.push(`[File: ${fd.fileUri} (${fd.mimeType})]`);
+                  }
+                } catch {
+                  partsContent.push(`[File: ${fd.fileUri} (${fd.mimeType})]`);
+                }
+              } else if ((p as any).inlineData) {
+                const id = (p as any).inlineData;
+                partsContent.push(`[${id.mimeType}: ${id.data}]`);
+              }
             }
             content = partsContent.join('\n');
           }

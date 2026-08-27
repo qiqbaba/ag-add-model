@@ -72,8 +72,28 @@ function loadTranslators(): void {
 }
 
 // Providers grouped by transport compatibility
-const OPENAI_COMPAT = new Set(['openai', 'ollama', 'openrouter', 'custom', 'groq', 'mistral', 'cerebras', 'nvidia', 'opencode', 'codestral']);
-const ANTHROPIC_COMPAT = new Set(['anthropic', 'deepseek', 'kimi', 'fireworks', 'lmstudio', 'llamacpp', 'wafer', 'zai']);
+const OPENAI_COMPAT = new Set([
+  'openai',
+  'ollama',
+  'openrouter',
+  'custom',
+  'groq',
+  'mistral',
+  'cerebras',
+  'nvidia',
+  'opencode',
+  'codestral',
+]);
+const ANTHROPIC_COMPAT = new Set([
+  'anthropic',
+  'deepseek',
+  'kimi',
+  'fireworks',
+  'lmstudio',
+  'llamacpp',
+  'wafer',
+  'zai',
+]);
 
 // ─── Public API ───────────────────────────────────────────────────────────
 
@@ -88,8 +108,10 @@ export function translateRequest(provider: string, geminiBody: unknown, modelNam
   const t = getTranslator(provider);
 
   if (provider === 'google') return geminiBody;
-  if (OPENAI_COMPAT.has(provider)) return t?.mapGeminiToOpenAI ? t.mapGeminiToOpenAI(geminiBody, modelName) : geminiBody;
-  if (ANTHROPIC_COMPAT.has(provider)) return t?.mapGeminiToAnthropic ? t.mapGeminiToAnthropic(geminiBody, modelName) : geminiBody;
+  if (OPENAI_COMPAT.has(provider))
+    return t?.mapGeminiToOpenAI ? t.mapGeminiToOpenAI(geminiBody, modelName) : geminiBody;
+  if (ANTHROPIC_COMPAT.has(provider))
+    return t?.mapGeminiToAnthropic ? t.mapGeminiToAnthropic(geminiBody, modelName) : geminiBody;
 
   // Generic: try mapGeminiTo<Provider> convention
   const fnName = `mapGeminiTo${provider.charAt(0).toUpperCase() + provider.slice(1)}`;
@@ -105,8 +127,10 @@ export function translateResponse(provider: string, providerRes: unknown, modelN
   const t = getTranslator(provider);
 
   if (provider === 'google') return providerRes;
-  if (OPENAI_COMPAT.has(provider)) return t?.mapOpenAIToGemini ? t.mapOpenAIToGemini(providerRes, modelName) : providerRes;
-  if (ANTHROPIC_COMPAT.has(provider)) return t?.mapAnthropicToGemini ? t.mapAnthropicToGemini(providerRes, modelName) : providerRes;
+  if (OPENAI_COMPAT.has(provider))
+    return t?.mapOpenAIToGemini ? t.mapOpenAIToGemini(providerRes, modelName) : providerRes;
+  if (ANTHROPIC_COMPAT.has(provider))
+    return t?.mapAnthropicToGemini ? t.mapAnthropicToGemini(providerRes, modelName) : providerRes;
 
   const fnName = `map${provider.charAt(0).toUpperCase() + provider.slice(1)}ToGemini`;
   if (t && typeof t[fnName] === 'function') {
@@ -122,7 +146,8 @@ export function translateStreamChunk(provider: string, chunk: unknown, modelName
 
   if (provider === 'google') return t?.mapGoogleChunkToGemini ? t.mapGoogleChunkToGemini(chunk, modelName) : null;
   if (OPENAI_COMPAT.has(provider)) return t?.mapOpenAIChunkToGemini ? t.mapOpenAIChunkToGemini(chunk, modelName) : null;
-  if (ANTHROPIC_COMPAT.has(provider)) return t?.mapAnthropicChunkToGemini ? t.mapAnthropicChunkToGemini(chunk, modelName) : null;
+  if (ANTHROPIC_COMPAT.has(provider))
+    return t?.mapAnthropicChunkToGemini ? t.mapAnthropicChunkToGemini(chunk, modelName) : null;
 
   const fnName = `map${provider.charAt(0).toUpperCase() + provider.slice(1)}ChunkToGemini`;
   if (t && typeof t[fnName] === 'function') {

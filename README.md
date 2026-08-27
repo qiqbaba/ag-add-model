@@ -26,13 +26,14 @@ Antigravity IDE
 
 ### 关键组件
 
-#### 代理核心
+#### 代理核心与入口
 | 文件 | 作用 |
 |---|---|
-| [proxy.ts](src/proxy.ts) | 本地 HTTP 代理：拦截 Cloud Code API、合并自定义模型、翻译提供商格式、包装响应 |
+| [index.ts](src/index.ts) | 统一模块入口：导出代理服务生命周期函数、校验器、加解密工具与翻译器注册表 |
+| [proxy.ts](src/proxy.ts) | 本地 HTTP 代理：拦截 Cloud Code API、注入自定义模型、翻译提供商协议、包装 SSE 流式响应 |
 | [registry.ts](src/proxy/registry.ts) | 自动发现式翻译器注册表，动态加载 `openai`、`anthropic`、`google`、`ollama` 翻译器 |
-| [shared.ts](src/proxy/shared.ts) | 跨轮次状态管理，带自动 TTL 清理 |
-| [modelUtils.ts](src/proxy/modelUtils.ts) | 集中式模型能力检测（thinking、DeepSeek、Claude） |
+| [shared.ts](src/proxy/shared.ts) | 跨轮次状态管理，带自动 TTL 定期清理 |
+| [modelUtils.ts](src/proxy/modelUtils.ts) | 集中式模型能力检测（thinking、DeepSeek、Claude、Vision 等） |
 
 #### 格式翻译器
 | 文件 | 作用 |
@@ -48,14 +49,6 @@ Antigravity IDE
 |---|---|
 | [cryptoStore.ts](src/cryptoStore.ts) | 通过 Electron `safeStorage` 进行 AES-256-GCM API 密钥加密 |
 | [schemaValidator.ts](src/schemaValidator.ts) | 对 API 响应、自定义模型、流式分块进行运行时 Schema 校验 |
-
-#### UI 与应用集成
-| 文件 | 作用 |
-|---|---|
-| [preload.ts](src/preload.ts) | UI 注入：设置 → 模型中的自定义模型面板、带动画的内联添加模型弹窗、连通性测试按钮 |
-| [main.ts](src/main.ts) | 应用生命周期：拦截并阻断 `SetCloudCodeURL` 请求，防止前端覆盖代理端点 |
-| [ipcHandlers.ts](src/ipcHandlers.ts) | 后端 IPC：`storage:get-custom-models`、`storage:save-custom-model`、`storage:delete-custom-model`、`storage:test-model-connection` |
-| [languageServer.ts](src/languageServer.ts) | 改造后的语言服务器管理器，应用启动时拉起代理 |
 
 #### 部署脚本
 | 文件 | 作用 |
@@ -121,9 +114,9 @@ Antigravity 使用 Google 的 **Cloud Code 内部 API**（`v1internal:*` 端点�
 - **元数据请求**（`v1internal:*`，不含生成）：缓冲、解压、重写 URL 指回本地代理
 - **生成请求**（`streamGenerateContent`、`generateContent`）：直接透传不缓冲，保留实时流式
 
-### SetCloudCodeURL 阻断
+### 端点下发与路由（`jetski.cloudCodeUrl`）
 
-Antigravity 前端会周期性调用 `SetCloudCodeURL`，这会用默认 Google API URL 覆盖本地代理端点。`main.ts` 进程通过 `webRequest.onBeforeRequest` 拦截并**取消**这些请求，确保语言服务器始终经由本地代理路由。
+Antigravity IDE 通过用户设置项 `jetski.cloudCodeUrl` 将本地代理地址（`http://127.0.0.1:50999/v1internal/xxxxxxx`）动态下发给语言服务器（`--cloud_code_endpoint` 参数），使 IDE 的全部 Cloud Code 流量无缝路由至本地代理。代理对未经拦截的官方请求进行透明转发，对自定义模型进行实时拦截与协议转换。
 
 ### DSML 工具调用解析器
 
@@ -289,7 +282,11 @@ antigravity-add-model/
 | **LM Studio**（本地） | `lmstudio` | *（无需）* | `http://localhost:1234/v1` |
 | **llama.cpp**（本地） | `llamacpp` | *（无需）* | `http://localhost:8080/v1` |
 | **NVIDIA NIM** | `nvidia` | `apiKey` | `https://integrate.api.nvidia.com/v1` |
-| **自定义**（OpenAI 兼容） | `custom` | `apiKey` *（提供商 API 密钥）* | 任意 OpenAI 兼容端点 |
+| **自定义**（OpenAI 兼容） | `custom` 或 `openai` | `apiKey` *（提供商 API 密钥）* | 任意 OpenAI 兼容端点 |
+
+> [!IMPORTANT]
+> **第三方模型平台（商汤 SenseNova、硅基流动 SiliconFlow、阿里百炼 DashScope、智谱 AI 等）配置须知**：
+> 在 `custom_models.json` 中，`provider` 字段指的是**协议翻译器类型**，而非厂商品牌名。只要平台提供的是标准 OpenAI 兼容的 `/v1/chat/completions` 接口，`provider` **必须填写 `"openai"` 或 `"custom"`**，切勿填写 `"SenseNova"` 等自定义名称，否则代理将无法识别协议类型并导致请求透传报错 400（详见 [DEPLOY_ANTIGRAVITY_IDE.md](DEPLOY_ANTIGRAVITY_IDE.md) 坑 9）。
 
 > [!NOTE]
 > 对于**自定义**提供商，以 `/v1` 结尾的 URL 会自动追加 `/chat/completions`。它与 Together AI、OpenRouter、Groq、Mistral 及任何其他 OpenAI 兼容端点完全兼容。

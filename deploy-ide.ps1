@@ -1,4 +1,4 @@
-﻿# =====================================================================
+# =====================================================================
 # antigravity-add-model — Antigravity IDE (VS Code Fork) 自动部署脚本
 # 适用于解包式 resources\app 布局的 Antigravity IDE 独立版
 # 用法: .\deploy-ide.ps1 [-IdePath "..."] [-SkipBuild] [-SkipBinaryPatch]
@@ -81,8 +81,11 @@ Set-Content -Path (Join-Path $BackupDir "rollback.ps1") -Value $rollback -Encodi
 Write-Host "[4/8] 部署代理模块到 out\proxy ..." -ForegroundColor Yellow
 if (Test-Path $ProxyDir) { Remove-Item $ProxyDir -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $ProxyDir | Out-Null
-foreach ($f in @("proxy.js", "constants.js", "cryptoStore.js", "schemaValidator.js", "storage.js", "types.js")) {
-    Copy-Item (Join-Path $ProjectDir "dist\$f") $ProxyDir -Force
+foreach ($f in @("index.js", "proxy.js", "cryptoStore.js", "schemaValidator.js", "types.js")) {
+    $srcPath = Join-Path $ProjectDir "dist\$f"
+    if (Test-Path $srcPath) {
+        Copy-Item $srcPath $ProxyDir -Force
+    }
 }
 Copy-Item (Join-Path $ProjectDir "dist\proxy") "$ProxyDir\proxy" -Recurse -Force
 Set-Content -Path (Join-Path $ProxyDir "package.json") -Value '{"name":"antigravity-proxy-host","version":"1.0.0","private":true,"main":"bootstrap.js"}'

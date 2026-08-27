@@ -62,16 +62,18 @@ IDE 通过 `vscode.getCloudCodeUrl()` 读取用户设置 **`jetski.cloudCodeUrl`
 {
   "models": [
     {
-      "name": "models/deepseek-chat",          // 必填，必须包含 "/"
-      "displayName": "DeepSeek V3",
-      "provider": "openai",                     // 必填。内置: openai/anthropic/google/ollama/custom/
-                                                // openrouter/deepseek/groq/mistral/cerebras/kimi/
-                                                // fireworks/lmstudio/llamacpp/nvidia
-                                                // 任意其他值也可用：自动按 OpenAI 兼容协议处理；
-                                                // Anthropic 风格 API 请填 "anthropic"
-      "apiUrl": "https://api.deepseek.com/v1/chat/completions",  // 必填，完整端点 URL
-      "apiKey": "YOUR_KEY",                     // 可选，首次加载后自动加密为 enc: 格式
-      "externalModelName": "deepseek-chat"      // 发给上游的真实模型名
+      "name": "models/deepseek-v4-flash",       // 必填，必须以 "models/" 开头或包含 "/"
+      "displayName": "DeepSeek V4 Flash",       // 显示名称（尽量避免包含 flash/lite/pro 等分级关键词）
+      "provider": "openai",                     // 必填，协议类型！
+                                                // ⚠️ 无论国内国外第三方平台（商汤SenseNova、DeepSeek、硅基流动、
+                                                // 阿里百炼、Moonshot、智谱等），只要提供的是 OpenAI 兼容接口，
+                                                // 必须填写 "openai" 或 "custom"！不能写 "SenseNova" 等自定义名称，
+                                                // 否则代理无法匹配协议转换器，会导致请求透传报错 400（见坑 9）。
+                                                // Anthropic 风格接口填 "anthropic"，Google AI Studio 填 "google"。
+      "apiUrl": "https://token.sensenova.cn/v1/chat/completions",  // 必填，完整 chat/completions 或 messages 端点
+      "apiKey": "YOUR_API_KEY",                 // 可选。手动填写明文时设置 "encrypted": false，代理启动后会自动加密
+      "externalModelName": "deepseek-v4-flash", // 必填，上游 API 识别的真实模型 ID
+      "encrypted": false                        // 初始手动填写明文 API Key 时置为 false（或留空），请勿对明文 Key 标记 true
     }
   ]
 }
@@ -207,11 +209,26 @@ append 进每个 sort 的 `groups[0].modelIds`。
   （`flash`→`flsh`→`fx`，`lite`→`lt`，`low`→`l0w`，`medium`→`med1um`，`high`→`h1gh`，`pro`→`pr0`，`tier`→`tter`）。
 - 自定义模型保留在 `agentModelSorts[0].groups[0].modelIds` 末尾，不再使用独立分组（独立分组无法突破前端 10 项渲染上限）。
 
-**已知限制**（2026-08-27 更新）：
-- 前端模型选择器下拉列表**最多渲染约 10 项**（官方分级模型折叠后约 7 项 + 自定义模型 3 项）。若自定义模型超过 3 个，
-  超出的模型不会出现在下拉中（但仍在 `models` 映射中，可通过其他入口选择）。
-- 自定义模型显示名称中若包含 `flash`/`lite`/`low`/`medium`/`high`/`pro`/`tier` 等分级关键字，即使被 `sanitizeDisplayName()`
-  清洗，也可能因前端排序/过滤逻辑而无法显示。建议在 `custom_models.json` 中避免使用这些词汇。
+### 坑 9：自定义 provider 名称导致协议未转换 (HTTP 400 required model)（2026-08-27）
+
+**症状**：模型选择器中能看到自定义模型并能正常选中，但发送任何消息后，IDE 思考 1 秒立即报错：
+```
+Agent execution terminated due to error.
+Error ID: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+```
+
+**原因**：
+1. **协议类型误填为厂商名**：在 `custom_models.json` 中，将 `provider` 填写成了具体的厂商名称（如 `"SenseNova"`、`"SiliconFlow"` 等），而非协议标识（`"openai"`）。
+2. **协议转换器失效**：代理模块的 `registry.ts` 依据 `provider` 路由请求。当 `provider` 未匹配到内置支持列表时，代理**放弃协议转换**，直接将 Antigravity 的原生 Gemini 请求体（`{ contents: [...] }`）原样透传发送给了上游的 `/v1/chat/completions` 接口。
+3. **上游报 400**：上游 OpenAI 兼容接口因为缺少 `model` 和 `messages` 参数直接返回 HTTP 400：
+   ```json
+   {"error":{"message":"required model","type":"invalid_request_error","code":"3"}}
+   ```
+4. **配额耗尽 429**：部分模型可能同时存在上游欠费或 Workspace 配额不足（如商汤返回 `429 insufficient_quota: Workspace allocated quota exceeded`），需在上游平台控制台补充额度。
+
+**修复**：
+- `custom_models.json` 中：所有国内/国际第三方平台的 OpenAI 兼容接口，`provider` 字段**一律填写 `"openai"` 或 `"custom"`**。
+- 手动写入明文 API Key 时，务必将 `"encrypted": false`（或留空），代理启动后会自动调用 Electron `safeStorage` 进行加密。
 
 ## 五、渲染层注入说明（可选，默认不做）
 
@@ -272,4 +289,4 @@ C:\Users\21855\AppData\Local\Programs\Antigravity IDE\resources\app_backup\rollb
 
 ---
 
-*针对 Antigravity IDE 1.107.0（Windows x64）实测，2026-08-26；坑 7 修复于 2026-08-27，坑 8 补充于 2026-08-27。*
+*针对 Antigravity IDE 1.107.0（Windows x64）实测，2026-08-26；坑 7 修复于 2026-08-27，坑 8 补充于 2026-08-27，坑 9 补充于 2026-08-27。*
