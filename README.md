@@ -52,9 +52,6 @@ npx tsc
 
 你可以**同时配置来自不同提供商的多个模型**。它们会一并出现在 Antigravity 聊天界面的模型选择下拉列表中，可实时切换。
 
-<p align="center">
-  <img src="assets/chat_model_dropdown.png" alt="模型选择下拉列表" width="600">
-</p>
 
 | 提供商 | 格式 | 环境变量 / 密钥 | 默认 API URL |
 |---|---|---|---|
@@ -182,10 +179,6 @@ npx tsc
 - 表单校验（必填：模型 ID、API 密钥、API URL）
 - 留空时自动生成展示名称
 
-<p align="center">
-  <img src="assets/add_custom_model_modal.png" alt="添加自定义 AI 模型弹窗" width="45%">
-  <img src="assets/add_custom_model_provider_dropdown.png" alt="API 提供商选择" width="45%">
-</p>
 
 ### 自定义模型面板
 
@@ -198,9 +191,6 @@ npx tsc
 - 添加/删除操作后自动刷新
 - **高效 DOM 监听**：使用 `MutationObserver` 加 200ms 防抖，替代 `setInterval(1000ms)`，大幅降低 CPU 开销。注入成功后观察器自动断开，并在 SPA 页面切换时通过 URL 变化检测重新挂载。
 
-<p align="center">
-  <img src="assets/custom_models_dashboard.png" alt="自定义模型面板" width="800">
-</p>
 
 ### SSL 跳过（自签名 / 内部 CA）
 
