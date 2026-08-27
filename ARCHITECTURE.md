@@ -22,7 +22,7 @@
   - [3.1 IDE 架构要点](#31-ide-架构要点)
   - [3.2 一键部署流程（deploy-ide.ps1）](#32-一键部署流程deploy-ideps1)
   - [3.3 custom_models.json 配置规范与加解密](#33-custom_modelsjson-配置规范与加解密)
-- [四、踩坑实录与深度排障（1~9 坑完整收录）](#四踩坑实录与深度排障19-坑完整收录)
+- [四、踩坑实录与深度排障（1~10 坑完整收录）](#四踩坑实录与深度排障110-坑完整收录)
   - [坑 1：require 静默失败（ESM 主进程）](#坑-1require-静默失败esm-主进程)
   - [坑 2：Content-Length 与 Transfer-Encoding 冲突（Parse Error）](#坑-2content-length-与-transfer-encoding-冲突parse-error)
   - [坑 3：product.json 完整性校验警告](#坑-3productjson-完整性校验警告)
@@ -32,6 +32,7 @@
   - [坑 7：字段缺失导致官方 Low/Medium/High 子菜单 NaN 崩溃](#坑-7字段缺失导致官方-lowmediumhigh-子菜单-nan-崩溃)
   - [坑 8：Protobuf 枚举类型不匹配（thinkingLevel 必须为 int32 数字）](#坑-8protobuf-枚举类型不匹配thinkinglevel-必须为-int32-数字)
   - [坑 9：自定义 provider 名称导致协议未转换（HTTP 400 required model）](#坑-9自定义-provider-名称导致协议未转换http-400-required-model)
+  - [坑 10：多自定义模型仅显示 N-1 个（同名 slug 覆写）](#坑-10多自定义模型仅显示-n-1-个同名-slug-覆写)
 - [五、验证清单、日志速查与回滚](#五验证清单日志速查与回滚)
   - [5.1 部署验证清单](#51-部署验证清单)
   - [5.2 关键日志位置速查](#52-关键日志位置速查)
@@ -227,6 +228,16 @@ Antigravity 使用 Google 专有的 **Cloud Code 内部 API**（`v1internal:*` �
 * **OpenAI** `tool_calls` 与 **Anthropic** `tool_use` 会双向映射为 Gemini 的 `functionCall` / `functionResponse`。
 * 内置参数别名归一化（如把模型输出的 `absolute_path`、`filePath` 映射为 Antigravity 预期的 `AbsolutePath`）。
 
+#### 3. 内容解析与工具调用往返一致性（[`src/proxy/translators/openai.ts`](file:///d:/programme/antigravity-add-model/src/proxy/translators/openai.ts)）
+
+OpenAI 兼容自定义模型（`openai` / `custom` / `openrouter` / `ollama` 等）的响应内容由 `mapOpenAIToGemini`（非流式）与 `mapOpenAIChunkToGemini`（流式）翻译为 Gemini `candidates[].content.parts`。为保证工具调用能正确往返、且不丢失任何内容，翻译器遵循以下规则：
+
+1. **DSML 标签触发的工具调用也注册往返映射**。DSML（DeepSeek 式 `<DSML|invoke ...>`）解析出的 `functionCall` 与原生 `tool_calls` 分支一样，会分配 `id`、写入 `modelToolCallIds`、注册 `translatedToolCalls`，并对翻译改名后的参数二次 `normalizeToolArgs(tr.name, tr.args)`。缺失这些注册会让后续 `functionResponse` 无法反查回原始工具名，导致 `formatTranslatedResponse` 无法把本地文件工具结果还原成 CLI 输出。
+2. **`reasoning_content` / `reasoning` 与工具调用共存**。即使响应同时包含思考链与 `tool_calls`（或 DSML），翻译器也会把 `reasoning_content` 作为 `thought: true` 的 part 置于 `functionCall` 之前，而非整段丢弃。
+3. **流式分块中 reasoning 与 content 同 chunk 不互斥**。流式 `delta` 若同时携带 `reasoning_content` 与 `content`，两者分别以 `thought` part 与普通 `text` part 一并输出，避免因提前 `return` 丢失正文。流式结束（`stop` / `length` / `tool_calls`）时会统一补齐未清空的累积文本与待发射的 reasoning。
+
+对应回归用例见 `src/__tests__/openai.test.ts`（`should register DSML tool calls for response round-trip`、`should preserve reasoning_content alongside tool_calls`、`should keep content when reasoning and content arrive in the same chunk`）。
+
 ---
 
 ### 2.5 运行时状态管理与 TTL 清理
@@ -370,7 +381,7 @@ Antigravity 使用 Google 专有的 **Cloud Code 内部 API**（`v1internal:*` �
 
 ---
 
-## 四、踩坑实录与深度排障（1~9 坑完整收录）
+## 四、踩坑实录与深度排障（1~10 坑完整收录）
 
 ### 坑 1：`require` 静默失败（ESM 主进程）
 * **症状**：主进程代码注入后无任何效果，代理未启动，控制台无报错。

@@ -15,7 +15,7 @@
 | 文档 | 适用对象 | 内容 |
 |---|---|---|
 | **本 README** | 使用者 | 安装、配置、参数说明、安全机制、常见故障排查 |
-| [ARCHITECTURE.md](./ARCHITECTURE.md) | 维护者 / 部署者 | **全景技术指南**：系统架构设计、内部 API 逆向规范、自动化部署、**9 个已踩坑与修复**、验证清单与回滚 |
+| [ARCHITECTURE.md](./ARCHITECTURE.md) | 维护者 / 部署者 | **全景技术指南**：系统架构设计、内部 API 逆向规范、自动化部署、**10 个已踩坑与修复**、验证清单与回滚 |
 
 ---
 
@@ -37,7 +37,7 @@
 7. 启动 IDE 并进行健康检查
 
 > [!TIP]
-> IDE 采用解包式 `resources\app\` 布局（无 `app.asar`）。语言服务器的云端端点由 **`jetski.cloudCodeUrl`** 用户设置驱动，它会覆盖二进制内的硬编码 URL — 因此写入该设置是关键步骤。完整技术实现与 9 个已知坑见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
+> IDE 采用解包式 `resources\app\` 布局（无 `app.asar`）。语言服务器的云端端点由 **`jetski.cloudCodeUrl`** 用户设置驱动，它会覆盖二进制内的硬编码 URL — 因此写入该设置是关键步骤。完整技术实现与 10 个已知坑见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
 
 ### 从源码构建（TypeScript）
 
