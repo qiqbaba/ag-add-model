@@ -3,6 +3,7 @@
  * Handles Gemini ↔ Anthropic request/response mapping and streaming SSE events.
  */
 import * as path from 'path';
+import * as fs from 'fs';
 
 import log from 'electron-log';
 import {
@@ -19,7 +20,6 @@ import {
   stateTimestamps,
   touchStateTimestamp,
   stateKey,
-  StreamContext,
 } from '../shared';
 import { detectModelCapabilitiesByName } from '../modelUtils';
 
@@ -56,6 +56,8 @@ interface GeminiPart {
   thought?: boolean;
   functionCall?: GeminiFunctionCall;
   functionResponse?: GeminiFunctionResponse;
+  fileData?: { mimeType: string; fileUri: string };
+  inlineData?: { mimeType: string; data: string };
 }
 
 interface GeminiFunctionCall {
@@ -188,8 +190,10 @@ export function mapGeminiToAnthropic(
   sessionId?: string,
 ): AnthropicRequestBody {
   const messages: AnthropicMessage[] = [];
-  // Resolves a functionResponse lacking an explicit `id` from this request's
-  // conversation history (concurrency-safe, see openai.ts).
+  // Queue and index-aware tracking to resolve functionResponses even when multiple
+  // tool calls of the same name are executed in parallel (e.g. 3 list_dir calls).
+  const pendingCallsQueue: { id: string; name: string }[] = [];
+  const allCallsById: Map<string, { name: string }> = new Map();
   const lastCallIdByName: Record<string, string> = {};
   const stateKeyStr = stateKey(modelName, sessionId);
   let system: string | undefined = undefined;
@@ -199,18 +203,25 @@ export function mapGeminiToAnthropic(
   }
 
   if (geminiBody.contents) {
-    for (const item of geminiBody.contents) {
+    geminiBody.contents.forEach((item, itemIdx) => {
       if (item.parts) {
         const hasFunctionCall = item.parts.some((p) => p.functionCall);
         const hasFunctionResponse = item.parts.some((p) => p.functionResponse);
 
         if (hasFunctionCall && item.role === 'model') {
           const contentBlocks: AnthropicContentBlock[] = [];
-          for (const p of item.parts) {
+          item.parts.forEach((p, partIdx) => {
             if (p.text) contentBlocks.push({ type: 'text', text: p.text });
             if (p.functionCall) {
-              const callId = p.functionCall.id || 'call_' + Math.random().toString(36).slice(2, 10);
-              if (p.functionCall.name) lastCallIdByName[p.functionCall.name] = callId;
+              const callId =
+                p.functionCall.id ||
+                `call_${itemIdx}_${partIdx}_${p.functionCall.name || 'func'}`;
+              if (p.functionCall.name) {
+                lastCallIdByName[p.functionCall.name] = callId;
+              }
+              pendingCallsQueue.push({ id: callId, name: p.functionCall.name || '' });
+              allCallsById.set(callId, { name: p.functionCall.name || '' });
+
               let originalName = p.functionCall.name;
               let originalArgs = p.functionCall.args;
               const translatedInfo = translatedToolCalls.get(callId);
@@ -228,16 +239,46 @@ export function mapGeminiToAnthropic(
                     : (originalArgs as Record<string, unknown>),
               });
             }
-          }
+          });
           messages.push({ role: 'assistant', content: contentBlocks });
         } else if (hasFunctionResponse) {
           const contentBlocks: AnthropicContentBlock[] = [];
-          for (const p of item.parts) {
+          item.parts.forEach((p, partIdx) => {
             if (p.functionResponse) {
               const funcName = p.functionResponse.name || '';
               const modelTCIds = modelToolCallIds.get(stateKeyStr) || {};
-              const toolCallId =
-                p.functionResponse.id || lastCallIdByName[funcName] || modelTCIds[funcName] || 'call_' + funcName;
+              let toolCallId: string | undefined = undefined;
+
+              // 1. If explicit ID matches a known tool call in this conversation, use it
+              if (p.functionResponse.id && allCallsById.has(p.functionResponse.id)) {
+                toolCallId = p.functionResponse.id;
+                const qIdx = pendingCallsQueue.findIndex((c) => c.id === toolCallId);
+                if (qIdx >= 0) pendingCallsQueue.splice(qIdx, 1);
+              }
+
+              // 2. Look for the first matching tool call in pending queue by name
+              if (!toolCallId && funcName) {
+                const qIdx = pendingCallsQueue.findIndex((c) => c.name === funcName);
+                if (qIdx >= 0) {
+                  toolCallId = pendingCallsQueue[qIdx].id;
+                  pendingCallsQueue.splice(qIdx, 1);
+                }
+              }
+
+              // 3. FIFO fallback from pending queue
+              if (!toolCallId && pendingCallsQueue.length > 0) {
+                toolCallId = pendingCallsQueue.shift()!.id;
+              }
+
+              // 4. Fallback to explicit ID or recorded ID or deterministic ID
+              if (!toolCallId) {
+                toolCallId =
+                  p.functionResponse.id ||
+                  lastCallIdByName[funcName] ||
+                  modelTCIds[funcName] ||
+                  `call_${itemIdx}_${partIdx}_${funcName || 'func'}`;
+              }
+
               const responseData = p.functionResponse.response;
               let contentStr = '';
               const translatedInfo = translatedToolCalls.get(toolCallId);
@@ -252,7 +293,7 @@ export function mapGeminiToAnthropic(
                 content: contentStr,
               });
             }
-          }
+          });
           messages.push({ role: 'user', content: contentBlocks });
         } else {
           const roleStr = item.role === 'model' ? 'assistant' : item.role || 'user';
@@ -260,19 +301,18 @@ export function mapGeminiToAnthropic(
           const contentBlocks: AnthropicContentBlock[] = [];
           const textParts: string[] = [];
           const hasImage = parts.some(
-            (p) => (p as any).inlineData && (p as any).inlineData.mimeType?.startsWith('image/'),
+            (p) => p.inlineData && p.inlineData.mimeType?.startsWith('image/'),
           );
           for (const p of parts) {
             if (p.text) {
               textParts.push(p.text);
               if (hasImage) contentBlocks.push({ type: 'text', text: p.text });
-            } else if ((p as any).fileData) {
-              const fd = (p as any).fileData;
+            } else if (p.fileData) {
+              const fd = p.fileData;
               let textContent: string;
               try {
                 const url = new URL(fd.fileUri);
                 if (url.protocol === 'file:') {
-                  const fs = require('fs');
                   textContent = `[File:\n${fs.readFileSync(url.pathname.replace(/^\//, '').replace(/\//g, path.sep), 'utf-8')}\n]`;
                 } else {
                   textContent = `[File: ${fd.fileUri} (${fd.mimeType})]`;
@@ -282,8 +322,8 @@ export function mapGeminiToAnthropic(
               }
               textParts.push(textContent);
               if (hasImage) contentBlocks.push({ type: 'text', text: textContent });
-            } else if ((p as any).inlineData) {
-              const id = (p as any).inlineData;
+            } else if (p.inlineData) {
+              const id = p.inlineData;
               if (id.mimeType && id.mimeType.startsWith('image/')) {
                 contentBlocks.push({
                   type: 'image',
@@ -308,7 +348,7 @@ export function mapGeminiToAnthropic(
           }
         }
       }
-    }
+    });
   }
 
   const result: AnthropicRequestBody = {
@@ -378,7 +418,7 @@ export function mapAnthropicToGemini(
   if (functionCalls.length > 0) {
     return {
       candidates: [
-        { content: { parts: [...parts, ...functionCalls], role: 'model' }, finishReason: 'TOOL_CALL', index: 0 },
+        { content: { parts: [...parts, ...functionCalls], role: 'model' }, finishReason: 'STOP', index: 0 },
       ],
       usageMetadata: {
         promptTokenCount: anthRes.usage?.input_tokens || 0,
@@ -476,13 +516,16 @@ export function mapAnthropicChunkToGemini(
         }
         return { functionCall: { name: translated.name, args: translated.args as Record<string, unknown>, id: tc.id } };
       });
+      context.hasEmittedToolCall = true;
       activeStreamContexts.delete(streamId);
-      return { content: { parts, role: 'model' }, finishReason: 'TOOL_CALL', index: 0 };
+      return { content: { parts, role: 'model' }, finishReason: 'STOP', index: 0 };
     }
   }
 
   if (type === 'message_stop') {
+    const hadToolCall = context.hasEmittedToolCall;
     activeStreamContexts.delete(streamId);
+    if (hadToolCall) return null;
     return { content: { parts: [], role: 'model' }, finishReason: 'STOP', index: 0 };
   }
 

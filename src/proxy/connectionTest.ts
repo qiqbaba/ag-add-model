@@ -36,8 +36,11 @@ export interface TestConnectionResult {
 /**
  * Normalizes OpenAI-compatible URLs to ensure they point to the chat completions endpoint.
  */
-function normalizeOpenAiUrl(apiUrl: string): string {
+function normalizeOpenAiUrl(apiUrl: string, isOllama = false): string {
   let url = apiUrl.trim();
+  if (isOllama && url.match(/^https?:\/\/localhost\/?$/i)) {
+    url = 'http://localhost:11434';
+  }
   const urlLower = url.toLowerCase();
   if (!urlLower.includes('/chat/completions') && !urlLower.includes('/completions')) {
     if (url.endsWith('/v1')) {
@@ -360,7 +363,7 @@ export async function testModelConnection(params: TestConnectionParams): Promise
     // ── 3. Ollama ──────────────────────────────────────────────────────────
     if (provider === 'ollama') {
       const modelName = externalModel || 'llama3';
-      const targetUrl = normalizeOpenAiUrl(rawUrl);
+      const targetUrl = normalizeOpenAiUrl(rawUrl, true);
       const body = JSON.stringify({
         model: modelName,
         messages: [{ role: 'user', content: 'Hi' }],

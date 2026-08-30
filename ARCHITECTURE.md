@@ -23,7 +23,7 @@
   - [3.2 一键部署流程（deploy-ide.ps1）](#32-一键部署流程deploy-ideps1)
   - [3.3 custom_models.json 配置规范与加解密](#33-custom_modelsjson-配置规范与加解密)
   - [3.4 可视化配置与连通性测试面板（Web Dashboard & RESTful API）](#34-可视化配置与连通性测试面板web-dashboard--restful-api)
-- [四、踩坑实录与深度排障（1~10 坑完整收录）](#四踩坑实录与深度排障110-坑完整收录)
+- [四、踩坑实录与深度排障（1~13 坑完整收录）](#四踩坑实录与深度排障113-坑完整收录)
   - [坑 1：require 静默失败（ESM 主进程）](#坑-1require-静默失败esm-主进程)
   - [坑 2：Content-Length 与 Transfer-Encoding 冲突（Parse Error）](#坑-2content-length-与-transfer-encoding-冲突parse-error)
   - [坑 3：product.json 完整性校验警告](#坑-3productjson-完整性校验警告)
@@ -34,6 +34,10 @@
   - [坑 8：Protobuf 枚举类型不匹配（thinkingLevel 必须为 int32 数字）](#坑-8protobuf-枚举类型不匹配thinkinglevel-必须为-int32-数字)
   - [坑 9：自定义 provider 名称导致协议未转换（HTTP 400 required model）](#坑-9自定义-provider-名称导致协议未转换http-400-required-model)
   - [坑 10：多自定义模型仅显示 N-1 个（同名 slug 覆写）](#坑-10多自定义模型仅显示-n-1-个同名-slug-覆写)
+  - [坑 11：Web 面板打不开 / 返回 Google 404（部署副本过期）](#坑-11web-面板打不开--返回-google-404部署副本过期)
+  - [坑 12：GLM-5.2 / SenseNova 等模型在文本流中输出原始 <tool_call> 标签](#坑-12glm-52--sensenova-等模型在文本流中输出原始-tool_call-标签导致泄漏且工具不执行)
+  - [坑 13：自定义模型回答过程中自动结束（finishReason 与多轮 content 丢弃）](#坑-13自定义模型回答过程中自动结束finishreason-与多轮-content-丢弃)
+  - [坑 14：多工具/并行工具调用（Explored N folders）后 ID 错乱导致模型直接停止](#坑-14多工具并行工具调用explored-n-folders后-id-错乱导致模型直接停止)
 - [五、验证清单、日志速查与回滚](#五验证清单日志速查与回滚)
   - [5.1 部署验证清单](#51-部署验证清单)
   - [5.2 关键日志位置速查](#52-关键日志位置速查)
@@ -515,6 +519,43 @@ OpenAI 兼容自定义模型（`openai` / `custom` / `openrouter` / `ollama` 等
 
   部署脚本会用新编译的 `dist` 覆盖 `out\proxy\`（含面板三部曲模块），并重启代理。完成后用 `Invoke-WebRequest http://127.0.0.1:50999/` 应返回 HTTP 200 与 `<!DOCTYPE html>`（约 68 KB SPA），即面板恢复。
 * **预防**：修改涉及 `src/proxy.ts`、`src/proxy/dashboardHtml.ts` 等代理源码后，务必重新运行 `deploy-ide.ps1`；IDE 自动更新后同样需重跑。任何情况下不要手工只改 `out\main.js` 注入而跳过代理模块部署。
+
+---
+
+### 坑 12：GLM-5.2 / SenseNova 等模型在文本流中输出原始 `<tool_call>` 标签导致泄漏且工具不执行
+
+* **症状**：自定义接入 GLM-5.2、商汤 SenseNova、Hermes、Qwen 或其他 OpenAI 兼容模型时，模型回复直接把 `<tool_call>list_dirDirectoryPath":"d:\programme\..."toolAction":"..."toolSummary":"..."}` 或 `<tool_call>view_file\n{"AbsolutePath": "..."}</tool_call>` 作为普通纯文本输出到聊天界面，IDE 未能识别并自动执行对应工具。
+* **根因**：部分模型 / API 网关（如 GLM-5.2、ChatGLM 系列、部分开源模型微调格式）未走标准的 OpenAI `choices[0].delta.tool_calls` 结构体，而是在 `content` 文本流中输出原生 `<tool_call>`、`<function_call>` 或未带起始大括号 `{` 的拼接键值对字符串。代理层原先仅支持 DeepSeek 格式的 `<DSML|...>` 匹配且只 hold back `<DSML|` 标记，导致其他模型发出的 `<tool_call>` 原始标记在流式阶段直接透传泄漏至前端，且在流结束时未能提取出 Gemini 标准的 `functionCall`。
+* **修复**：
+  1. 在 `src/proxy/translators/openai.ts` 中实现通用文本工具调用解析引擎（`parseDSMLToolCalls` / `parseTextToolCalls`），覆盖 DSML、XML 命名标签、Hermes/Qwen JSON 对象、GLM 拼接参数以及 Antigravity 原生 `<call:default_api:...>` 格式；
+  2. 实现流式实时 Holdback 拦截列表（`TOOL_CALL_START_MARKERS`），在流式传输阶段遇到任何未闭合的工具调用标签时先 hold 住原始标记（仅发射标签前的导引正文），彻底防止 `<tool_call>` 等标签在界面闪烁泄漏；
+  3. 流式结束或标签闭合后，自动将解析出的工具名与参数归一化为标准的 Gemini `functionCall` 并返回 `finishReason: "STOP"`，驱动 IDE 自动调用相应工具。
+
+---
+
+### 坑 13：自定义模型回答过程中自动结束（finishReason 与多轮 content 丢弃）
+
+* **症状**：自定义模型在执行完第 1 轮工具调用后，第 2 轮输出思考或一两句话（如“让我深入了解项目的核心代码文件。”）后，直接弹出点赞/点踩按钮，任务意外终止，后续工具（如 `view_file`）未被执行。
+* **根因**：
+  1. **Protobuf 枚举不匹配**：在 Gemini 官方规范中，模型在流式结束或产生 `functionCall` 时，`finishReason` 的 Protobuf 枚举为 `STOP`（或 `OTHER`）。代理层先前误将其包装为 `'TOOL_CALL'`。Antigravity 的 Go 语言服务器（`language_server_windows_x64.exe`）通过 `protojson` 反序列化时由于枚举表中不存在 `TOOL_CALL`，导致整段响应 candidate 解析失败被丢弃，IDE 误以为生成已终止；
+  2. **多轮对话上下文丢失**：在 `mapGeminiToOpenAI` 中，当 `item.role === 'model'` 且包含 `hasFunctionCall` 时，先前代码将 `messages.push({ role: 'assistant', content: null, ... })`，强行将上一轮模型的发言正文与思考过程丢弃（置为 `null`）。这导致上游模型在多轮会话中语境断裂，无法连贯判断后续工具调用动作。
+* **修复**（[`src/proxy/translators/openai.ts`](file:///d:/programme/antigravity-add-model/src/proxy/translators/openai.ts) & [`src/proxy/translators/anthropic.ts`](file:///d:/programme/antigravity-add-model/src/proxy/translators/anthropic.ts)）：
+  1. 将 OpenAI / Anthropic 翻译器中所有工具调用的 `finishReason` 从 `'TOOL_CALL'` 严格规范化为 Gemini 官方 Protobuf 标准的 `'STOP'`；
+  2. 在 `mapGeminiToOpenAI` 中，`hasFunctionCall` 分支下完整保留并提取上一轮模型的正文 `content` 与 `reasoning_content`，确保多轮上下文完整连贯传给上游大模型。
+
+---
+
+### 坑 14：多工具/并行工具调用（Explored N folders）后 ID 错乱导致模型直接停止
+
+* **症状**：自定义模型（如 GLM-5.2、DeepSeek、SenseNova）在执行完并发工具调用（如一次探索了 3 个文件夹 `Explored 3 folders`）后，在下一轮思考一句（如“现在让我查看核心代码文件。先从入口和配置开始。”）后立即无后续动作直接停下，弹出点赞点踩按钮。
+* **根因**：
+  1. **同名并行 Tool Call ID 覆盖**：先前代码使用标量字典 `lastCallIdByName[funcName] = callId` 记录 ID。当模型在同一轮发起 3 个同名工具调用（例如 3 个 `list_dir`）时，`lastCallIdByName['list_dir']` 会被连续覆写，最终只保留第 3 个 ID。紧接着在解析 3 个 `functionResponse` 时，全部取到了第 3 个 ID，导致构造给上游大模型的上下文出现 `tool_call_id` 重复且前 2 个工具调用缺失返回值，上游模型上下文混乱或返回 HTTP 400 并终止循环；
+  2. **Math.random() 历史失步**：Gemini 上下文重传时未持久化 `id`，代理每次重新随机生成 ID，导致不同轮次间 `assistant.tool_calls` 与 `tool.tool_call_id` 匹配断裂；
+  3. **Thinking 模型 Token 预算过低**：默认 `maxOutputTokens: 4000` 在深度思考模型生成长 reasoning 时被消耗殆尽，触发 `length` 截断。
+* **修复**（[`src/proxy/translators/openai.ts`](file:///d:/programme/antigravity-add-model/src/proxy/translators/openai.ts) & [`src/proxy/translators/anthropic.ts`](file:///d:/programme/antigravity-add-model/src/proxy/translators/anthropic.ts)）：
+  1. 引入严格的 FIFO 队列与双向索引机制（`pendingCallsQueue` + `allCallsById`），无论单次发起多少个同名或异名并行工具调用，均能 1-to-1 精确按序匹配对应 `tool_call_id`；
+  2. 使用基于位置索引的确定性 ID 规则（`call_{itemIdx}_{partIdx}_{funcName}`），杜绝跨轮重新生成导致的 ID 错位；
+  3. 为思考/GLM/DeepSeek/SenseNova 模型自动扩充 `max_tokens` 默认上限至 `16384`。
 
 ---
 

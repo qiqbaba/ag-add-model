@@ -147,7 +147,7 @@ export function getModelsViewModel(includeKeys = false): ModelViewModel[] {
   const models = readDecryptedModels();
   const usedSlugs = new Set<string>();
 
-  return models.map((m, index) => {
+  return models.map((m, _index) => {
     const baseSlug = generateSlug(m);
     let slug = baseSlug;
     let counter = 2;

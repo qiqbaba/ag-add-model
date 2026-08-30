@@ -151,7 +151,9 @@ export function getGoogleApiUrl(baseUrl: string, modelName: string, isStream: bo
     } else if (modelName) {
       // Append full path with model name
       const method = isStream ? ':streamGenerateContent' : ':generateContent';
-      url += `models/${modelName}${method}`;
+      const cleanModel = modelName.replace(/^\/+/, '');
+      const fullModelPath = cleanModel.startsWith('models/') ? cleanModel : `models/${cleanModel}`;
+      url += `/${fullModelPath}${method}`;
     } else {
       // Fallback: assume the URL is already complete
       log.warn('[GoogleTranslator] Could not determine model name for URL construction');

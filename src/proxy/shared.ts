@@ -9,6 +9,8 @@ export interface StreamContext {
   accumulatedText: string;
   accumulatedReasoning: string;
   toolCalls: Record<number, { id: string; name: string; arguments: string }>;
+  hasEmittedToolCall?: boolean;
+  terminalFinishReason?: string;
 }
 
 export interface StateTimestamps {

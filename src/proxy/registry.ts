@@ -39,9 +39,20 @@ export interface ProviderHeaders {
   [key: string]: string | undefined;
 }
 
+import * as openaiTranslator from './translators/openai';
+import * as anthropicTranslator from './translators/anthropic';
+import * as googleTranslator from './translators/google';
+import * as ollamaTranslator from './translators/ollama';
+
 // ─── Registry State ───────────────────────────────────────────────────────
 
 const translators = new Map<string, TranslatorModule>();
+
+// Pre-register static translators for guaranteed runtime availability in all environments
+translators.set('openai', openaiTranslator as TranslatorModule);
+translators.set('anthropic', anthropicTranslator as TranslatorModule);
+translators.set('google', googleTranslator as TranslatorModule);
+translators.set('ollama', ollamaTranslator as TranslatorModule);
 
 // ─── Auto-Discovery ───────────────────────────────────────────────────────
 
@@ -49,25 +60,34 @@ function loadTranslators(): void {
   const translatorDir = path.join(__dirname, 'translators');
 
   try {
-    const files = fs.readdirSync(translatorDir).filter((f) => f.endsWith('.js') && f !== 'utils.js');
+    if (fs.existsSync(translatorDir)) {
+      const files = fs
+        .readdirSync(translatorDir)
+        .filter(
+          (f) =>
+            (f.endsWith('.js') || f.endsWith('.ts')) &&
+            !f.endsWith('.d.ts') &&
+            !f.startsWith('utils.'),
+        );
 
-    for (const file of files) {
-      const provider = path.basename(file, '.js');
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const mod = require(path.join(translatorDir, file)) as TranslatorModule;
-        translators.set(provider, mod);
-        log.info(`[TranslatorRegistry] Loaded provider translator: "${provider}"`);
-      } catch (err) {
-        log.error(`[TranslatorRegistry] Failed to load translator "${provider}":`, (err as Error).message);
+      for (const file of files) {
+        const provider = file.replace(/\.(js|ts)$/, '');
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-var-requires
+          const mod = require(path.join(translatorDir, file)) as TranslatorModule;
+          translators.set(provider, mod);
+          log.info(`[TranslatorRegistry] Loaded provider translator: "${provider}"`);
+        } catch (err) {
+          log.debug(`[TranslatorRegistry] Dynamic load for "${provider}" skipped:`, (err as Error).message);
+        }
       }
     }
   } catch (err) {
-    log.error('[TranslatorRegistry] Failed to scan translators directory:', (err as Error).message);
+    log.debug('[TranslatorRegistry] Dynamic discovery note:', (err as Error).message);
   }
 
   log.info(
-    `[TranslatorRegistry] ${translators.size} provider translator(s) loaded: ${[...translators.keys()].join(', ')}`,
+    `[TranslatorRegistry] ${translators.size} provider translator(s) active: ${[...translators.keys()].join(', ')}`,
   );
 }
 

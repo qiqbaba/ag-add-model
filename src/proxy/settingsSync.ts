@@ -343,7 +343,7 @@ function insertProperty(content: string, bounds: { open: number; close: number }
  * - Returns null on malformed input (caller skips the write).
  */
 export function rewriteJsoncSetting(content: string, key: string, value: string): string | null {
-  const re = new RegExp(`(${makeKeyMatcher(key)}\\s*:\\s*)(?:"([^"]*)"|'([^']*)'|[^,}\\s][^,}]*?)`);
+  const re = new RegExp(`(${makeKeyMatcher(key)}\\s*:\\s*)(?:"([^"]*)"|'([^']*)'|([^,}\\s][^,}]*?))`);
   const m = content.match(re);
   if (m) {
     const current = m[2] ?? m[3] ?? m[4];

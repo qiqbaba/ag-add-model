@@ -8,6 +8,7 @@ import * as http from 'http';
 import * as https from 'https';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as zlib from 'zlib';
 import log from 'electron-log';
 
 // ─── Types ────────────────────────────────────────────────────────────────
@@ -64,7 +65,7 @@ import {
 } from './proxy/shared';
 
 // Model configuration & capability detection
-import { detectModelCapabilities, detectModelCapabilitiesByName } from './proxy/modelUtils';
+import { detectModelCapabilities } from './proxy/modelUtils';
 
 // Provider translator registry (auto-discovers translators from proxy/translators/)
 import * as registry from './proxy/registry';
@@ -325,7 +326,6 @@ function proxyToGoogle(req: http.IncomingMessage, res: http.ServerResponse, reqB
         const encoding = proxyRes.headers['content-encoding'];
         if (encoding === 'gzip') {
           try {
-            const zlib = require('zlib');
             text = zlib.gunzipSync(fullResBody).toString('utf-8');
           } catch (e) {
             log.error('[Proxy] gunzipSync failed:', e);
@@ -544,10 +544,17 @@ function handleCustomModelRequest(
             `[Proxy] Stream API error (${apiRes.statusCode}) for ${model.name}: ${errorBody.substring(0, 300)}`,
           );
           if (retryCount < MAX_RETRIES) {
-            log.warn(`[Proxy] Stream error, retrying (${retryCount + 1}/${MAX_RETRIES})...`);
+            const retryAfter = parseRetryAfter(apiRes.headers);
+            const delay =
+              apiRes.statusCode === 429
+                ? (retryAfter > 0 ? retryAfter : 3000 * Math.pow(2, retryCount))
+                : 1000 * (retryCount + 1);
+            log.warn(
+              `[Proxy] Stream error ${apiRes.statusCode} for ${model.name}, retrying in ${delay}ms (${retryCount + 1}/${MAX_RETRIES})...`,
+            );
             setTimeout(
               () => handleCustomModelRequest(res, model, geminiBody, isStream, sessionId, retryCount + 1),
-              1000 * (retryCount + 1),
+              delay,
             );
             return;
           }
@@ -565,6 +572,8 @@ function handleCustomModelRequest(
       });
 
       let buffer = '';
+      let lastFinishReason: string | undefined;
+
       apiRes.on('data', (chunk: Buffer) => {
         buffer += chunk.toString('utf-8');
         const lines = buffer.split('\n');
@@ -581,6 +590,10 @@ function handleCustomModelRequest(
               const mapped = registry.translateStreamChunk(provider, parsed, model.name, sessionId);
 
               if (mapped) {
+                const mappedObj = mapped as { finishReason?: string };
+                if (mappedObj.finishReason && mappedObj.finishReason !== 'OTHER') {
+                  lastFinishReason = mappedObj.finishReason;
+                }
                 const cloudCodeResponse = {
                   response: { candidates: [mapped] },
                   traceId: '',
@@ -604,6 +617,10 @@ function handleCustomModelRequest(
               const parsed = JSON.parse(dataStr);
               const mapped = registry.translateStreamChunk(provider, parsed, model.name, sessionId);
               if (mapped) {
+                const mappedObj = mapped as { finishReason?: string };
+                if (mappedObj.finishReason && mappedObj.finishReason !== 'OTHER') {
+                  lastFinishReason = mappedObj.finishReason;
+                }
                 const cloudCodeResponse = {
                   response: { candidates: [mapped] },
                   traceId: '',
@@ -617,20 +634,23 @@ function handleCustomModelRequest(
           }
         }
 
-        const finalChunk = {
-          response: {
-            candidates: [
-              {
-                content: { parts: [], role: 'model' },
-                finishReason: 'STOP',
-                index: 0,
-              },
-            ],
-          },
-          traceId: '',
-          metadata: {},
-        };
-        res.write(`data: ${JSON.stringify(finalChunk)}\n\n`);
+        // Only send a fallback STOP chunk if the stream closed without ANY terminal finishReason (e.g. STOP or TOOL_CALL)
+        if (!lastFinishReason) {
+          const finalChunk = {
+            response: {
+              candidates: [
+                {
+                  content: { parts: [], role: 'model' },
+                  finishReason: 'STOP',
+                  index: 0,
+                },
+              ],
+            },
+            traceId: '',
+            metadata: {},
+          };
+          res.write(`data: ${JSON.stringify(finalChunk)}\n\n`);
+        }
         res.end();
       });
     } else {
@@ -1742,8 +1762,13 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
       if (matchedCustomModel) {
         try {
           const geminiBody = JSON.parse(bodyStr) as GeminiRequestBody;
-          resolveFileData(geminiBody, req.headers as Record<string, string | string[] | undefined>).then(() => {
-            handleCustomModelRequest(res, matchedCustomModel, geminiBody, isStandardStream);
+          const reqHeaders = req.headers as Record<string, string | string[] | undefined>;
+          const sessionId =
+            ((geminiBody as Record<string, unknown>).requestId as string | undefined) ||
+            (reqHeaders['x-goog-request-id'] as string | undefined) ||
+            (reqHeaders['x-request-id'] as string | undefined);
+          resolveFileData(geminiBody, reqHeaders).then(() => {
+            handleCustomModelRequest(res, matchedCustomModel, geminiBody, isStandardStream, sessionId);
           });
           return;
         } catch (e) {

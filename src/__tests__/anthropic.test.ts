@@ -88,6 +88,48 @@ describe('mapGeminiToAnthropic', () => {
     expect(blocks.some((b) => b.type === 'tool_result')).toBe(true);
   });
 
+  it('should correctly pair multiple parallel tool calls with their responses in Anthropic format', () => {
+    const result = mapGeminiToAnthropic(
+      {
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              { functionCall: { name: 'list_dir', args: { DirectoryPath: '/folder1' } } },
+              { functionCall: { name: 'list_dir', args: { DirectoryPath: '/folder2' } } },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              { functionResponse: { name: 'list_dir', response: 'dir1 output' } },
+              { functionResponse: { name: 'list_dir', response: 'dir2 output' } },
+            ],
+          },
+        ],
+      },
+      'claude-3-5-sonnet-latest',
+      'session-anthropic-parallel',
+    );
+
+    const assistantMsg = result.messages[0];
+    const assistantBlocks = assistantMsg.content as Array<Record<string, unknown>>;
+    const toolUses = assistantBlocks.filter((b) => b.type === 'tool_use');
+    expect(toolUses).toHaveLength(2);
+    const id1 = toolUses[0].id as string;
+    const id2 = toolUses[1].id as string;
+    expect(id1).not.toBe(id2);
+
+    const userMsg = result.messages[1];
+    const userBlocks = userMsg.content as Array<Record<string, unknown>>;
+    const toolResults = userBlocks.filter((b) => b.type === 'tool_result');
+    expect(toolResults).toHaveLength(2);
+    expect(toolResults[0].tool_use_id).toBe(id1);
+    expect(toolResults[0].content).toContain('dir1 output');
+    expect(toolResults[1].tool_use_id).toBe(id2);
+    expect(toolResults[1].content).toContain('dir2 output');
+  });
+
   it('should set max_tokens from generationConfig', () => {
     const body = {
       contents: [],
@@ -199,7 +241,7 @@ describe('mapAnthropicToGemini', () => {
       stop_reason: 'tool_use',
     };
     const result = mapAnthropicToGemini(res, 'claude-3-5-sonnet-latest');
-    expect(result.candidates[0].finishReason).toBe('TOOL_CALL');
+    expect(result.candidates[0].finishReason).toBe('STOP');
     const fcParts = result.candidates[0].content.parts.filter((p) => p.functionCall);
     expect(fcParts).toHaveLength(1);
     expect(fcParts[0].functionCall!.name).toBe('search');
@@ -326,7 +368,7 @@ describe('mapAnthropicChunkToGemini', () => {
       'claude-3-5-sonnet-latest',
     );
     expect(result).not.toBeNull();
-    expect(result!.finishReason).toBe('TOOL_CALL');
+    expect(result!.finishReason).toBe('STOP');
   });
 
   it('should handle message_stop', () => {

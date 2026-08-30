@@ -65,6 +65,29 @@ describe('mapGeminiToOpenAI', () => {
     expect(result.messages[0].tool_calls![0].function.name).toBe('search');
   });
 
+  it('should preserve assistant text and reasoning_content alongside functionCall', () => {
+    const body = {
+      contents: [
+        {
+          role: 'model',
+          parts: [
+            { text: 'Thinking about files...', thought: true },
+            { text: 'Let me list the files.', thought: false },
+            {
+              functionCall: { name: 'list_dir', args: { DirectoryPath: '.' }, id: 'call_123' },
+            },
+          ],
+        },
+      ],
+    };
+    const result = mapGeminiToOpenAI(body, 'gpt-4o');
+    expect(result.messages[0].role).toBe('assistant');
+    expect(result.messages[0].content).toBe('Let me list the files.');
+    expect(result.messages[0].reasoning_content).toBe('Thinking about files...');
+    expect(result.messages[0].tool_calls).toHaveLength(1);
+    expect(result.messages[0].tool_calls![0].function.name).toBe('list_dir');
+  });
+
   it('should handle functionResponse parts as tool messages', () => {
     const body = {
       contents: [
@@ -214,7 +237,7 @@ describe('mapOpenAIToGemini', () => {
       usage: { prompt_tokens: 5, completion_tokens: 10, total_tokens: 15 },
     };
     const result = mapOpenAIToGemini(res, 'gpt-4o');
-    expect(result.candidates[0].finishReason).toBe('TOOL_CALL');
+    expect(result.candidates[0].finishReason).toBe('STOP');
     expect(result.candidates[0].content.parts[0].functionCall).toBeDefined();
     expect(result.candidates[0].content.parts[0].functionCall!.name).toBe('search');
   });
@@ -233,7 +256,7 @@ describe('mapOpenAIToGemini', () => {
       usage: { prompt_tokens: 5, completion_tokens: 10, total_tokens: 15 },
     };
     const result = mapOpenAIToGemini(res, 'deepseek-v4');
-    expect(result.candidates[0].finishReason).toBe('TOOL_CALL');
+    expect(result.candidates[0].finishReason).toBe('STOP');
     const fcParts = result.candidates[0].content.parts.filter((p) => p.functionCall);
     expect(fcParts.length).toBeGreaterThan(0);
   });
@@ -339,6 +362,51 @@ describe('mapOpenAIToGemini', () => {
     );
     const toolMsg = request.messages.find((m) => m.role === 'tool')!;
     expect(toolMsg.tool_call_id).toBe(fc.id);
+  });
+
+  it('should correctly pair multiple parallel tool calls of the same name with their responses', () => {
+    const request = mapGeminiToOpenAI(
+      {
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              { functionCall: { name: 'list_dir', args: { DirectoryPath: '/folder1' } } },
+              { functionCall: { name: 'list_dir', args: { DirectoryPath: '/folder2' } } },
+              { functionCall: { name: 'list_dir', args: { DirectoryPath: '/folder3' } } },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              { functionResponse: { name: 'list_dir', response: 'dir1 output' } },
+              { functionResponse: { name: 'list_dir', response: 'dir2 output' } },
+              { functionResponse: { name: 'list_dir', response: 'dir3 output' } },
+            ],
+          },
+        ],
+      },
+      'deepseek-v4',
+      'session-parallel',
+    );
+
+    const assistantMsg = request.messages.find((m) => m.role === 'assistant')!;
+    expect(assistantMsg.tool_calls).toHaveLength(3);
+    const id1 = assistantMsg.tool_calls![0].id;
+    const id2 = assistantMsg.tool_calls![1].id;
+    const id3 = assistantMsg.tool_calls![2].id;
+
+    // All 3 IDs must be unique
+    expect(new Set([id1, id2, id3]).size).toBe(3);
+
+    const toolMsgs = request.messages.filter((m) => m.role === 'tool');
+    expect(toolMsgs).toHaveLength(3);
+    expect(toolMsgs[0].tool_call_id).toBe(id1);
+    expect(toolMsgs[0].content).toContain('dir1 output');
+    expect(toolMsgs[1].tool_call_id).toBe(id2);
+    expect(toolMsgs[1].content).toContain('dir2 output');
+    expect(toolMsgs[2].tool_call_id).toBe(id3);
+    expect(toolMsgs[2].content).toContain('dir3 output');
   });
 
   it('should preserve reasoning_content alongside tool_calls', () => {
@@ -472,7 +540,7 @@ describe('mapOpenAIChunkToGemini', () => {
       'gpt-4o',
     );
     expect(result).not.toBeNull();
-    expect(result!.finishReason).toBe('TOOL_CALL');
+    expect(result!.finishReason).toBe('STOP');
   });
 
   it('should handle stop finish with pending tool calls', () => {
@@ -555,7 +623,7 @@ describe('mapOpenAIToGemini DSML tool_call wrapper', () => {
       usage: { prompt_tokens: 5, completion_tokens: 10, total_tokens: 15 },
     };
     const result = mapOpenAIToGemini(res, 'deepseek-v4');
-    expect(result.candidates[0].finishReason).toBe('TOOL_CALL');
+    expect(result.candidates[0].finishReason).toBe('STOP');
     const fcParts = result.candidates[0].content.parts.filter((p) => p.functionCall);
     expect(fcParts.length).toBe(1);
     expect(fcParts[0].functionCall!.name).toBe('list_dir');
@@ -595,7 +663,7 @@ describe('mapOpenAIToGemini DSML tool_call wrapper', () => {
       usage: { prompt_tokens: 5, completion_tokens: 10, total_tokens: 15 },
     };
     const result = mapOpenAIToGemini(res, 'deepseek-v4');
-    expect(result.candidates[0].finishReason).toBe('TOOL_CALL');
+    expect(result.candidates[0].finishReason).toBe('STOP');
     const fcParts = result.candidates[0].content.parts.filter((p) => p.functionCall);
     expect(fcParts.length).toBe(1);
     expect(fcParts[0].functionCall!.name).toBe('list_dir');
@@ -620,7 +688,7 @@ describe('mapOpenAIToGemini DSML tool_call wrapper', () => {
       usage: { prompt_tokens: 5, completion_tokens: 10, total_tokens: 15 },
     };
     const result = mapOpenAIToGemini(res, 'deepseek-v4');
-    expect(result.candidates[0].finishReason).not.toBe('TOOL_CALL');
+    expect(result.candidates[0].finishReason).toBe('STOP');
     const text = result.candidates[0].content.parts
       .filter((p) => p.text)
       .map((p) => p.text!)
@@ -671,7 +739,7 @@ describe('mapOpenAIToGemini DSML tool_call wrapper', () => {
       usage: { prompt_tokens: 5, completion_tokens: 10, total_tokens: 15 },
     };
     const result = mapOpenAIToGemini(res, 'deepseek-v4');
-    expect(result.candidates[0].finishReason).toBe('TOOL_CALL');
+    expect(result.candidates[0].finishReason).toBe('STOP');
     const fc = result.candidates[0].content.parts.filter((p) => p.functionCall);
     expect(fc.length).toBe(1);
     expect(fc[0].functionCall!.name).toBe('run_command');
@@ -689,3 +757,116 @@ describe('mapOpenAIToGemini DSML tool_call wrapper', () => {
     expect(text).not.toContain('DSML');
   });
 });
+
+// ─── GLM-5.2 / SenseNova / Hermes / Qwen / XML Text Tool Call Support ─────────
+
+describe('mapOpenAIToGemini GLM & Multi-Model Text Tool Calls', () => {
+  it('should parse GLM-5.2 concatenated key-value format without leading brace or closing tag', () => {
+    const rawContent =
+      '我来检查项目的所有代码，首先了解项目结构。\n<tool_call>list_dirDirectoryPath":"d:\\programme\\fuli_crawler"toolAction":"Listing project directory"toolSummary":"Directory listing"}';
+    const res = {
+      choices: [{ message: { content: rawContent }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 10, completion_tokens: 25, total_tokens: 35 },
+    };
+    const result = mapOpenAIToGemini(res, 'glm-5.2');
+    expect(result.candidates[0].finishReason).toBe('STOP');
+    const fc = result.candidates[0].content.parts.filter((p) => p.functionCall);
+    expect(fc.length).toBe(1);
+    expect(fc[0].functionCall!.name).toBe('list_dir');
+    expect(fc[0].functionCall!.args).toEqual({ DirectoryPath: 'd:\\programme\\fuli_crawler' });
+    // lead-in text is preserved, raw tags stripped
+    const text = result.candidates[0].content.parts
+      .filter((p) => p.text)
+      .map((p) => p.text!)
+      .join('');
+    expect(text).toContain('我来检查项目的所有代码');
+    expect(text).not.toContain('<tool_call>');
+    expect(text).not.toContain('toolAction');
+  });
+
+  it('should parse GLM / standard <tool_call>name\n{...}</tool_call>', () => {
+    const rawContent =
+      'Checking files:\n<tool_call>view_file\n{"AbsolutePath": "d:\\\\test\\\\app.ts"}\n</tool_call>';
+    const res = {
+      choices: [{ message: { content: rawContent }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 5, completion_tokens: 15, total_tokens: 20 },
+    };
+    const result = mapOpenAIToGemini(res, 'glm-5.2');
+    expect(result.candidates[0].finishReason).toBe('STOP');
+    const fc = result.candidates[0].content.parts.filter((p) => p.functionCall);
+    expect(fc.length).toBe(1);
+    expect(fc[0].functionCall!.name).toBe('view_file');
+    expect(fc[0].functionCall!.args).toEqual({ AbsolutePath: 'd:\\test\\app.ts' });
+  });
+
+  it('should parse Hermes / Qwen format <tool_call>{"name": "...", "arguments": {...}}</tool_call>', () => {
+    const rawContent =
+      '<tool_call>\n{"name": "grep_search", "arguments": {"Query": "findMe", "SearchPath": "D:\\\\project"}}\n</tool_call>';
+    const res = {
+      choices: [{ message: { content: rawContent }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 5, completion_tokens: 15, total_tokens: 20 },
+    };
+    const result = mapOpenAIToGemini(res, 'qwen-2.5');
+    expect(result.candidates[0].finishReason).toBe('STOP');
+    const fc = result.candidates[0].content.parts.filter((p) => p.functionCall);
+    expect(fc.length).toBe(1);
+    expect(fc[0].functionCall!.name).toBe('grep_search');
+    expect(fc[0].functionCall!.args).toEqual({ Query: 'findMe', SearchPath: 'D:\\project' });
+  });
+
+  it('should parse Antigravity call tag format <call:default_api:list_dir{...}>', () => {
+    const rawContent =
+      '<call:default_api:list_dir{"DirectoryPath": "D:\\workspace"}>';
+    const res = {
+      choices: [{ message: { content: rawContent }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 5, completion_tokens: 10, total_tokens: 15 },
+    };
+    const result = mapOpenAIToGemini(res, 'custom-model');
+    expect(result.candidates[0].finishReason).toBe('STOP');
+    const fc = result.candidates[0].content.parts.filter((p) => p.functionCall);
+    expect(fc.length).toBe(1);
+    expect(fc[0].functionCall!.name).toBe('list_dir');
+    expect(fc[0].functionCall!.args).toEqual({ DirectoryPath: 'D:\\workspace' });
+  });
+
+  it('should hold GLM-5.2 <tool_call> markup during streaming and emit STOP at finish', () => {
+    const streamId = 'stream_glm_52';
+    const chunk1 = {
+      id: streamId,
+      choices: [
+        {
+          delta: {
+            content: '我来检查项目的所有代码。\n<tool_call>list_dirDirectoryPath":"d:\\programme\\fuli_crawler"',
+          },
+          index: 0,
+        },
+      ],
+    };
+    const chunk2 = {
+      id: streamId,
+      choices: [
+        {
+          delta: {
+            content: 'toolAction":"Listing project directory"toolSummary":"Directory listing"}',
+          },
+          finish_reason: 'stop',
+          index: 0,
+        },
+      ],
+    };
+
+    const r1 = mapOpenAIChunkToGemini(chunk1, 'glm-5.2');
+    const text1 = (r1?.content.parts.filter((p) => p.text).map((p) => p.text!) || []).join('').trim();
+    expect(text1).toBe('我来检查项目的所有代码。');
+    expect(text1).not.toContain('<tool_call>');
+
+    const r2 = mapOpenAIChunkToGemini(chunk2, 'glm-5.2');
+    expect(r2).not.toBeNull();
+    expect(r2!.finishReason).toBe('STOP');
+    const fc = r2!.content.parts.filter((p) => p.functionCall);
+    expect(fc.length).toBe(1);
+    expect(fc[0].functionCall!.name).toBe('list_dir');
+    expect(fc[0].functionCall!.args).toEqual({ DirectoryPath: 'd:\\programme\\fuli_crawler' });
+  });
+});
+
