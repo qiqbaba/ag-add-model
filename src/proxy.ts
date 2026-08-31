@@ -490,7 +490,14 @@ function handleCustomModelRequest(
   if (provider === 'google' || provider === 'ollama') {
     const providerTranslator = registry.getTranslator(provider);
     finalUrlStr = registry.getProviderUrl(finalUrlStr, model.externalModelName, isStream, providerTranslator);
-  } else if (provider === 'openai' || model.provider === 'custom' || model.provider === 'openrouter') {
+  } else if (
+    // NOTE: URL auto-completion ONLY applies to openai / custom / openrouter.
+    // Other OpenAI-compatible providers (groq, mistral, cerebras, nvidia, codestral, opencode)
+    // do NOT get /chat/completions appended here — configure their apiUrl with the full path.
+    provider === 'openai' ||
+    model.provider === 'custom' ||
+    model.provider === 'openrouter'
+  ) {
     const urlLower = finalUrlStr.toLowerCase();
     if (!urlLower.includes('/chat/completions') && !urlLower.includes('/completions')) {
       if (finalUrlStr.endsWith('/v1')) {

@@ -1,6 +1,6 @@
 # Antigravity 自定义模型启用器 · 架构设计与部署全景指南
 
-> 本文是 **Antigravity IDE 独立版**（VS Code Fork 架构，解包式 `resources\app`）的核心技术文档，完整整合了**系统架构设计**、**Cloud Code 内部 API 逆向工程**、**自动化部署实现**、**9 个深坑排查实录**、**验证清单与回滚手册**。
+> 本文是 **Antigravity IDE 独立版**（VS Code Fork 架构，解包式 `resources\app`）的核心技术文档，完整整合了**系统架构设计**、**Cloud Code 内部 API 逆向工程**、**自动化部署实现**、**12 个深坑排查实录**、**验证清单与回滚手册**。
 
 ---
 
@@ -23,7 +23,11 @@
   - [3.2 一键部署流程（deploy-ide.ps1）](#32-一键部署流程deploy-ideps1)
   - [3.3 custom_models.json 配置规范与加解密](#33-custom_modelsjson-配置规范与加解密)
   - [3.4 可视化配置与连通性测试面板（Web Dashboard & RESTful API）](#34-可视化配置与连通性测试面板web-dashboard--restful-api)
+<<<<<<< HEAD
 - [四、踩坑实录与深度排障（1~13 坑完整收录）](#四踩坑实录与深度排障113-坑完整收录)
+=======
+- [四、踩坑实录与深度排障（1~12 坑完整收录）](#四踩坑实录与深度排障112-坑完整收录)
+>>>>>>> a641afc (docs: 扩充踩坑实录至 12 例，收窄 URL 自动补全范围并新增模型提供商支持)
   - [坑 1：require 静默失败（ESM 主进程）](#坑-1require-静默失败esm-主进程)
   - [坑 2：Content-Length 与 Transfer-Encoding 冲突（Parse Error）](#坑-2content-length-与-transfer-encoding-冲突parse-error)
   - [坑 3：product.json 完整性校验警告](#坑-3productjson-完整性校验警告)
@@ -35,9 +39,13 @@
   - [坑 9：自定义 provider 名称导致协议未转换（HTTP 400 required model）](#坑-9自定义-provider-名称导致协议未转换http-400-required-model)
   - [坑 10：多自定义模型仅显示 N-1 个（同名 slug 覆写）](#坑-10多自定义模型仅显示-n-1-个同名-slug-覆写)
   - [坑 11：Web 面板打不开 / 返回 Google 404（部署副本过期）](#坑-11web-面板打不开--返回-google-404部署副本过期)
+<<<<<<< HEAD
   - [坑 12：GLM-5.2 / SenseNova 等模型在文本流中输出原始 <tool_call> 标签](#坑-12glm-52--sensenova-等模型在文本流中输出原始-tool_call-标签导致泄漏且工具不执行)
   - [坑 13：自定义模型回答过程中自动结束（finishReason 与多轮 content 丢弃）](#坑-13自定义模型回答过程中自动结束finishreason-与多轮-content-丢弃)
   - [坑 14：多工具/并行工具调用（Explored N folders）后 ID 错乱导致模型直接停止](#坑-14多工具并行工具调用explored-n-folders后-id-错乱导致模型直接停止)
+=======
+  - [坑 12：自定义模型工具调用「不执行 / 提前结束」——finishReason 回归](#坑-12自定义模型工具调用不执行--提前结束finishreason-回归)
+>>>>>>> a641afc (docs: 扩充踩坑实录至 12 例，收窄 URL 自动补全范围并新增模型提供商支持)
 - [五、验证清单、日志速查与回滚](#五验证清单日志速查与回滚)
   - [5.1 部署验证清单](#51-部署验证清单)
   - [5.2 关键日志位置速查](#52-关键日志位置速查)
@@ -80,7 +88,7 @@ Antigravity IDE（VS Code Fork）中，语言服务器与云端大模型交互�
 
 ### 1.2 核心模块与文件清单
 
-当前代码库采用极简聚焦的设计，所有核心功能分布在以下文件中：
+当前代码库的全部核心功能分布在以下文件中（运行时源文件 17 个 + `src/__tests__/` 测试 10 个 + `src/__mocks__/` mock 1 个，共 28 个 `.ts` 文件）：
 
 ```
 antigravity-add-model/
@@ -90,17 +98,22 @@ antigravity-add-model/
 │   ├── cryptoStore.ts             # API 密钥安全存储（基于 Electron safeStorage AES-256-GCM）
 │   ├── schemaValidator.ts         # 运行时 Schema 校验器（模型配置、API 响应、流分块）
 │   ├── types.d.ts                 # 全局 Ambient 类型声明（Electron 与 Node.js 扩展）
+│   ├── __tests__/                 # 单元/回归测试（vitest，共 10 个测试文件）
+│   ├── __mocks__/                 # 测试 mock 模块（electron-log 等）
 │   └── proxy/
 │       ├── registry.ts            # 翻译器注册表：自动发现并动态加载 translators/ 模块
 │       ├── shared.ts              # 跨轮次上下文状态管理（Map 隔离 + 托管 TTL 垃圾回收）
 │       ├── modelUtils.ts          # 模型能力集中检测（Thinking、DeepSeek、Claude、Vision 等）
 │       ├── settingsSync.ts        # 运行时端口 ↔ settings.json / active_port 双向同步（JSONC 安全）
+│       ├── connectionTest.ts      # 连通性探测引擎（RTT 测量、401/403/404/429 诊断）
+│       ├── dashboardHtml.ts       # Web 面板 SPA HTML 模板（约 1700+ 行）
+│       ├── modelConfigManager.ts  # 模型增删改查、safeStorage 加解密、.bak 备份
 │       └── translators/
+│           ├── utils.ts           # 翻译器共享工具（DSML 解析、工具调用映射、参数归一化）
 │           ├── openai.ts          # OpenAI ↔ Gemini 双向翻译器（请求、响应、SSE、Tool Calls）
 │           ├── anthropic.ts       # Anthropic ↔ Gemini 双向翻译器（Claude tool_use、Thinking）
 │           ├── google.ts          # Google AI Studio 透传与动态端点路由
-│           ├── ollama.ts          # Ollama 本地模型适配器（端点规范化与错误转译）
-│           └── utils.ts           # 翻译器共享工具（DSML 解析、工具调用映射、参数归一化）
+│           └── ollama.ts          # Ollama 本地模型适配器（端点规范化与错误转译）
 ├── dist/                          # TypeScript 编译产物
 ├── deploy-ide.ps1                 # Antigravity IDE 一键部署与注入脚本
 ├── ARCHITECTURE.md                # 架构设计与部署全景指南（本文档）
@@ -110,8 +123,8 @@ antigravity-add-model/
 ### 1.3 多协议翻译器体系
 
 翻译器注册表（[`src/proxy/registry.ts`](file:///d:/programme/antigravity-add-model/src/proxy/registry.ts)）具备自动发现能力：
-* **OpenAI 兼容协议族**（`openai`, `openrouter`, `custom`, `ollama`, `groq`, `mistral`, `cerebras`, `nvidia` 等）：统一路由至 `openai.ts` 转换器，支持流式 SSE、原生 `tool_calls`、DeepSeek DSML 标签解析，以及图像输入（`image_url` 内容块）。
-* **Anthropic 协议族**（`anthropic`, `claude` 等）：路由至 `anthropic.ts`，映射 `system`、`tool_use`、`content_block_delta`、extended thinking 块，以及图像输入（`type: "image"` base64 内容块）。
+* **OpenAI 兼容协议族**（`openai`, `ollama`, `openrouter`, `custom`, `groq`, `mistral`, `cerebras`, `nvidia`, `opencode`, `codestral`）：统一路由至 `openai.ts` 转换器，支持流式 SSE、原生 `tool_calls`、DeepSeek DSML 标签解析，以及图像输入（`image_url` 内容块）。
+* **Anthropic 兼容协议族**（`anthropic`, `deepseek`, `kimi`, `fireworks`, `lmstudio`, `llamacpp`, `wafer`, `zai`）：统一路由至 `anthropic.ts` 转换器，映射 `system`、`tool_use`、`content_block_delta`、extended thinking 块，以及图像输入（`type: "image"` base64 内容块）。
 * **Google AI Studio 协议**（`google`）：原生 Gemini 格式透传，动态根据流式状态挂载 `:streamGenerateContent` 或 `:generateContent`。
 
 ---
@@ -322,22 +335,26 @@ OpenAI 兼容自定义模型（`openai` / `custom` / `openrouter` / `ollama` 等
 .\deploy-ide.ps1 -IdePath "$env:LOCALAPPDATA\Programs\Antigravity IDE"
 ```
 
-#### 脚本自动化执行阶段：
+#### 脚本自动化执行阶段（共 10 步，从 0 开始编号，与脚本内 `[N/9]` 输出一致）：
+0. **环境检查**：验证 `out\main.js` 存在，读取 `resources\app\package.json` 确认名称/版本与 ESM（`type: "module"`）；非 ESM 时提示注入方式可能需调整；
 1. **编译构建**：在当前目录执行 `npm run build` 生成 `dist/`；
-2. **安全备份**：将 `main.js` 及语言服务器 exe 备份至 `resources\app_backup\`（附带 `rollback.ps1`）；
-3. **部署代理模块**：将代理运行时文件复制到 `resources\app\out\proxy\`，并在该目录安装 `electron-log`；
-4. **主进程注入**：在 `out\main.js` 顶部插入动态导入代码：
+2. **终止进程**：强制终止 `Antigravity IDE` 与 `language_server_windows_x64` 进程（避免文件占用）；
+3. **安全备份**：将 `main.js`、`workbench.desktop.main.js`、`product.json` 及语言服务器 exe 备份至 `resources\app_backup\`（附带 `rollback.ps1`）；
+4. **部署代理模块**：将代理运行时文件复制到 `resources\app\out\proxy\`，并在该目录安装 `electron-log`；自动对已部署的 `proxy.js` 应用 `transfer-encoding` 修复补丁，并生成 `bootstrap.js`；
+5. **主进程注入**：在 `out\main.js` 顶部插入动态导入代码：
    ```js
    /* antigravity-add-model bootstrap */
    import('./proxy/bootstrap.js').catch(function(e){console.error('[agy-proxy] import failed',e);});
    ```
-5. **写入用户设置**：向 `%APPDATA%\Antigravity IDE\User\settings.json` 写入本地代理端点（种子值，幂等）：
+6. **前端补丁与哈希同步**：修复 workbench 模型选择器高度/滚动/宽度（`max-h-80`→`min(85vh, 600px)`、移除 `scrollbar-none`、`max-w-80`→`max-w-96`），并同步重算 `product.json` 的 `checksums`；
+7. **写入用户设置**：向 `%APPDATA%\Antigravity IDE\User\settings.json` 写入本地代理端点（种子值，幂等）：
    ```json
    "jetski.cloudCodeUrl": "http://127.0.0.1:50999/v1internal/xxxxxxx"
    ```
    > [!NOTE]
    > 该端点常驻为默认端口 `50999` 的种子值；**代理实际启动时会通过 `syncSettingsJson` 将其自动校正为真实监听端口**（无论是 50999 还是动态回退端口），因此此处只保证键存在即可。
-6. **启动与健康检查**：启动 IDE 并请求 `http://127.0.0.1:50999/health` 验证服务状态。
+8. **LS 二进制补丁（可选）**：将语言服务器 exe 内的硬编码 URL 替换为本地代理（用 `-SkipBinaryPatch` 跳过；此架构下非必需）；
+9. **初始化与启动**：创建 `~/.gemini/antigravity/custom_models.json`（若不存在），启动 IDE 并请求 `http://127.0.0.1:50999/health` 验证服务状态（`-OpenDashboard` 时自动打开可视化面板）。
 
 ---
 
@@ -402,7 +419,8 @@ OpenAI 兼容自定义模型（`openai` / `custom` / `openrouter` / `ollama` 等
 
 | Method | Endpoint | 说明 |
 | :--- | :--- | :--- |
-| `GET` | `/` 或 `/dashboard` | 返回可视化管理 Web 面板单页应用 (SPA) |
+| `GET` | `/`、`/dashboard`、`/ui`、`/index.html` | 返回可视化管理 Web 面板单页应用 (SPA) |
+| `GET` | `/health`、`/healthz` | 健康检查：返回 `status`、运行时长、监听端口、内存占用与代理状态快照 |
 | `GET` | `/api/status` | 获取代理运行状态（端口、内存占用、加密状态、配置路径等） |
 | `GET` | `/api/models` | 获取模型列表视图（含脱敏 API Key、能力元数据与 Schema 校验状态） |
 | `POST` | `/api/models` | 新增或更新自定义模型（自动 Schema 校验、加密与文件备份） |
@@ -413,7 +431,7 @@ OpenAI 兼容自定义模型（`openai` / `custom` / `openrouter` / `ollama` 等
 
 ---
 
-## 四、踩坑实录与深度排障（1~10 坑完整收录）
+## 四、踩坑实录与深度排障（1~12 坑完整收录）
 
 ### 坑 1：`require` 静默失败（ESM 主进程）
 * **症状**：主进程代码注入后无任何效果，代理未启动，控制台无报错。

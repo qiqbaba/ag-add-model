@@ -15,7 +15,7 @@
 | 文档 | 适用对象 | 内容 |
 |---|---|---|
 | **本 README** | 使用者 | 安装、配置、参数说明、安全机制、常见故障排查 |
-| [ARCHITECTURE.md](./ARCHITECTURE.md) | 维护者 / 部署者 | **全景技术指南**：系统架构设计、内部 API 逆向规范、自动化部署、**10 个已踩坑与修复**、验证清单与回滚 |
+| [ARCHITECTURE.md](./ARCHITECTURE.md) | 维护者 / 部署者 | **全景技术指南**：系统架构设计、内部 API 逆向规范、自动化部署、**12 个已踩坑与修复**、验证清单与回滚 |
 
 ---
 
@@ -31,17 +31,20 @@
 .\deploy-ide.ps1 -IdePath "C:\Users\<User>\AppData\Local\Programs\Antigravity IDE" -OpenDashboard
 ```
 
-脚本自动完成：
+脚本自动完成（共 10 步，从 0 开始编号）：
+0. 环境检查（验证 `out\main.js` 存在、读取 `package.json` 确认 ESM）
 1. 构建 TypeScript → `dist/`（`npm run build`）
-2. 将 `main.js`、语言服务器二进制备份到 `resources\app_backup\`（含一键 `rollback.ps1`）
-3. 将代理运行时文件部署到 `resources\app\out\proxy\` 并安装 `electron-log`
-4. 在 `out\main.js` 顶部注入 ESM 动态 `import('./proxy/bootstrap.js')`
-5. 写入 `jetski.cloudCodeUrl` → 本地代理 URL（幂等，代理启动时自动校正为实际端口）
-6. （可选）对语言服务器二进制打补丁 — 用 `-SkipBinaryPatch` 跳过（此架构下非必需）
-7. 启动 IDE 并进行健康检查
+2. 终止 Antigravity / language_server 进程
+3. 将 `main.js`、`workbench.desktop.main.js`、`product.json`、语言服务器二进制备份到 `resources\app_backup\`（含一键 `rollback.ps1`）
+4. 将代理运行时文件部署到 `resources\app\out\proxy\` 并安装 `electron-log`，应用 `transfer-encoding` 修复补丁，生成 `bootstrap.js`
+5. 在 `out\main.js` 顶部注入 ESM 动态 `import('./proxy/bootstrap.js')`
+6. 修复前端模型选择器高度/滚动/宽度 + 同步 `product.json` checksums
+7. 写入 `jetski.cloudCodeUrl` → 本地代理 URL（幂等，代理启动时自动校正为实际端口）
+8. （可选）对语言服务器二进制打补丁 — 用 `-SkipBinaryPatch` 跳过（此架构下非必需）
+9. 初始化 `custom_models.json` 并启动 IDE 与健康检查
 
 > [!TIP]
-> IDE 采用解包式 `resources\app\` 布局（无 `app.asar`）。语言服务器的云端端点由 **`jetski.cloudCodeUrl`** 用户设置驱动，它会覆盖二进制内的硬编码 URL — 因此写入该设置是关键步骤。完整技术实现与 10 个已知坑见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
+> IDE 采用解包式 `resources\app\` 布局（无 `app.asar`）。语言服务器的云端端点由 **`jetski.cloudCodeUrl`** 用户设置驱动，它会覆盖二进制内的硬编码 URL — 因此写入该设置是关键步骤。完整技术实现与 12 个已知坑见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
 
 ### 一键开启 / 暂停代理（日常便捷切换）
 
@@ -89,6 +92,10 @@ npx tsc
 | **LM Studio**（本地） | `lmstudio` | *（无需）* | `http://localhost:1234/v1` |
 | **llama.cpp**（本地） | `llamacpp` | *（无需）* | `http://localhost:8080/v1` |
 | **NVIDIA NIM** | `nvidia` | `apiKey` | `https://integrate.api.nvidia.com/v1` |
+| **Codestral** | `codestral` | `apiKey` | `https://api.mistral.ai/v1` |
+| **opencode** | `opencode` | `apiKey` | 任意 OpenAI 兼容端点（opencode CLI 自带） |
+| **wafer** | `wafer` | `apiKey` | 任意 Anthropic 兼容端点 |
+| **zai** | `zai` | `apiKey` | 任意 Anthropic 兼容端点 |
 | **自定义**（OpenAI 兼容） | `custom` 或 `openai` | `apiKey` *（提供商 API 密钥）* | 任意 OpenAI 兼容端点 |
 
 > [!IMPORTANT]
@@ -96,7 +103,7 @@ npx tsc
 > 在 `custom_models.json` 中，`provider` 字段指的是**协议翻译器类型**，而非厂商品牌名。只要平台提供的是标准 OpenAI 兼容的 `/v1/chat/completions` 接口，`provider` **必须填写 `"openai"` 或 `"custom"`**，切勿填写 `"SenseNova"` 等自定义名称，否则代理将无法识别协议类型并导致请求透传报错 400（详见 [ARCHITECTURE.md](./ARCHITECTURE.md) 坑 9）。
 
 > [!NOTE]
-> 对于**自定义**提供商，以 `/v1` 结尾的 URL 会自动追加 `/chat/completions`。它与 Together AI、OpenRouter、Groq、Mistral 及任何其他 OpenAI 兼容端点完全兼容。
+> **URL 自动补全**：对于 `openai`、`custom`、`openrouter` 三种 provider，以 `/v1` 结尾的 URL 会自动追加 `/chat/completions`，否则自动补齐 `/v1/chat/completions`。它与 Together AI、OpenRouter 及任何 OpenAI 兼容端点完全兼容。**注意**：该自动补全**仅**对上述三种 provider 生效——`groq`、`mistral`、`cerebras`、`nvidia`、`codestral`、`opencode` 等其他 OpenAI 兼容 provider 不会触发自动追加，填写这些 provider 的 `apiUrl` 时需带上完整的 `/chat/completions` 路径。（`ollama` 的 URL 规范化在 `translators/ollama.ts` 中独立实现。）
 
 > [!NOTE]
 > **OpenRouter** 通过单一 API 提供对 300+ 模型（OpenAI、Anthropic、Google、Meta、DeepSeek 等）的统一访问。它使用 OpenAI 兼容格式，带 Bearer token 鉴权，并可选 `HTTP-Referer` / `X-Title` 头用于排名。
@@ -184,6 +191,7 @@ npx tsc
 | `allowUnauthorized` | （可选）设为 `true` 可跳过 SSL 证书校验。适用于内部/自签名端点。默认：`false`。 |
 | `timeout` | （可选）请求超时（毫秒）。默认：`120000`（2 分钟）。 |
 | `maxRetries` | （可选）限流/失败请求的最大重试次数。默认：`3`。 |
+| `encrypted` | （可选）API Key 是否已启用 `safeStorage` 静态加密。初始手动填写明文 Key 时为 `false`（或留空），代理启动后自动加密并置为 `true`。默认：`false`。 |
 
 ---
 
