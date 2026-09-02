@@ -9,6 +9,7 @@ import * as https from 'https';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as zlib from 'zlib';
+import { StringDecoder } from 'string_decoder';
 import log from 'electron-log';
 
 // ─── Types ────────────────────────────────────────────────────────────────
@@ -63,6 +64,7 @@ import {
   startCleanupInterval,
   stopCleanupInterval,
 } from './proxy/shared';
+import { discoverModels } from './proxy/modelDiscovery';
 
 // Model configuration & capability detection
 import { detectModelCapabilities } from './proxy/modelUtils';
@@ -79,6 +81,7 @@ import { renderDashboardHtml } from './proxy/dashboardHtml';
 import {
   getModelsViewModel,
   saveCustomModel,
+  saveCustomModels,
   deleteCustomModel,
   getRawConfig,
   saveRawConfig,
@@ -94,6 +97,7 @@ export {
   renderDashboardHtml,
   getModelsViewModel,
   saveCustomModel,
+  saveCustomModels,
   deleteCustomModel,
   getRawConfig,
   saveRawConfig,
@@ -117,7 +121,7 @@ function generateModelPlaceholderId(model: CustomModel): string {
   let hash = 5381;
   for (let i = 0; i < input.length; i++) {
     hash = (hash << 5) + hash + input.charCodeAt(i);
-    hash = hash & hash; // Force 32-bit integer
+    hash = hash | 0; // Force 32-bit integer
   }
   const placeholderNum = 400 + (Math.abs(hash) % 200);
   return `MODEL_PLACEHOLDER_M${placeholderNum}`;
@@ -477,6 +481,11 @@ function handleCustomModelRequest(
 
   const provider = model.provider === 'custom' || model.provider === 'openrouter' ? 'openai' : model.provider;
 
+  // Unique per upstream stream instance: isolates streaming translator state
+  // (accumulated text / tool calls) between concurrent streams of the SAME
+  // model+session, which previously shared a constant fallback key.
+  const streamInstanceId = `${model.name}|${sessionId || ''}|${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
   const payload = registry.translateRequest(provider, geminiBody, model.externalModelName, sessionId);
   const headers = registry.getProviderHeaders(provider, model.apiKey);
 
@@ -580,9 +589,12 @@ function handleCustomModelRequest(
 
       let buffer = '';
       let lastFinishReason: string | undefined;
+      // StringDecoder preserves multi-byte UTF-8 characters split across TCP
+      // chunk boundaries (chunk.toString() would corrupt them into �).
+      const decoder = new StringDecoder('utf-8');
 
       apiRes.on('data', (chunk: Buffer) => {
-        buffer += chunk.toString('utf-8');
+        buffer += decoder.write(chunk);
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
 
@@ -594,7 +606,7 @@ function handleCustomModelRequest(
             if (dataStr === '[DONE]') continue;
             try {
               const parsed = JSON.parse(dataStr);
-              const mapped = registry.translateStreamChunk(provider, parsed, model.name, sessionId);
+              const mapped = registry.translateStreamChunk(provider, parsed, model.name, sessionId, streamInstanceId);
 
               if (mapped) {
                 const mappedObj = mapped as { finishReason?: string };
@@ -617,12 +629,13 @@ function handleCustomModelRequest(
       });
 
       apiRes.on('end', () => {
+        buffer += decoder.end();
         if (buffer.trim().startsWith('data: ')) {
           const dataStr = buffer.trim().substring(6).trim();
           if (dataStr !== '[DONE]') {
             try {
               const parsed = JSON.parse(dataStr);
-              const mapped = registry.translateStreamChunk(provider, parsed, model.name, sessionId);
+              const mapped = registry.translateStreamChunk(provider, parsed, model.name, sessionId, streamInstanceId);
               if (mapped) {
                 const mappedObj = mapped as { finishReason?: string };
                 if (mappedObj.finishReason && mappedObj.finishReason !== 'OTHER') {
@@ -749,7 +762,10 @@ function handleCustomModelRequest(
     log.error(`[Proxy] Request timeout (${REQUEST_TIMEOUT_MS}ms) for ${model.name}`);
     request.destroy();
 
-    if (retryCount < MAX_RETRIES) {
+    // Never retry once streaming headers are flushed: a retried upstream
+    // response would writeHead() again on the same res and throw
+    // ERR_HTTP_HEADERS_SENT. Just close the stream instead.
+    if (retryCount < MAX_RETRIES && !res.headersSent) {
       log.warn(`[Proxy] Timeout for ${model.name}, retrying (${retryCount + 1}/${MAX_RETRIES})...`);
       setTimeout(
         () => handleCustomModelRequest(res, model, geminiBody, isStream, sessionId, retryCount + 1),
@@ -767,7 +783,7 @@ function handleCustomModelRequest(
   request.on('error', (err) => {
     log.error('[Proxy] Custom Model Request Error:', err);
 
-    if (retryCount < MAX_RETRIES) {
+    if (retryCount < MAX_RETRIES && !res.headersSent) {
       log.warn(`[Proxy] Network error for ${model.name}, retrying (${retryCount + 1}/${MAX_RETRIES})...`);
       setTimeout(
         () => handleCustomModelRequest(res, model, geminiBody, isStream, sessionId, retryCount + 1),
@@ -1255,6 +1271,95 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
       } catch (err) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: false, error: 'Invalid JSON body: ' + (err as Error).message }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && reqPathname === '/api/models/discover') {
+      try {
+        const discoverParams = JSON.parse(bodyStr) as {
+          name?: string;
+          apiUrl?: string;
+          apiKey?: string;
+          provider?: string;
+          allowUnauthorized?: boolean;
+          timeout?: number;
+        };
+        // Resolve masked/preserved keys from stored config (same as /api/models/test)
+        if (discoverParams.name && (!discoverParams.apiKey || discoverParams.apiKey.includes('••••'))) {
+          const existingModels = readDecryptedModels();
+          const found = existingModels.find(
+            (m) => m.name === discoverParams.name || generateSlug(m) === discoverParams.name,
+          );
+          if (found) {
+            discoverParams.provider = discoverParams.provider || found.provider;
+            discoverParams.apiUrl = discoverParams.apiUrl || found.apiUrl;
+            discoverParams.apiKey = found.apiKey;
+            discoverParams.allowUnauthorized =
+              discoverParams.allowUnauthorized !== undefined
+                ? discoverParams.allowUnauthorized
+                : found.allowUnauthorized;
+          }
+        }
+        discoverModels({
+          apiUrl: discoverParams.apiUrl || '',
+          apiKey: discoverParams.apiKey,
+          provider: discoverParams.provider || 'openai',
+          allowUnauthorized: discoverParams.allowUnauthorized,
+          timeout: discoverParams.timeout,
+        })
+          .then((discoverResult) => {
+            // Annotate each discovered model with whether it is already
+            // configured locally, so the dashboard can mark it as "已添加" and
+            // avoid duplicate additions.
+            if (discoverResult.success && Array.isArray(discoverResult.models)) {
+              const existingExternal = new Set(
+                readDecryptedModels()
+                  .map((m) => (m.externalModelName || '').toLowerCase())
+                  .filter(Boolean),
+              );
+              discoverResult.models = discoverResult.models.map((m) => ({
+                ...m,
+                exists: existingExternal.has((m.id || '').toLowerCase()),
+              }));
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(discoverResult));
+          })
+          .catch((err) => {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, models: [], error: (err as Error).message }));
+          });
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, models: [], error: 'Invalid JSON body: ' + (err as Error).message }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && reqPathname === '/api/models/batch') {
+      try {
+        const batchParams = JSON.parse(bodyStr) as { models?: Partial<CustomModel>[] };
+        const result = saveCustomModels(batchParams.models || []);
+        if (result.success) {
+          log.info(`[Proxy] Batch saved ${result.addedCount} models, skipped ${result.skippedCount}`);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } else {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        }
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            success: false,
+            addedCount: 0,
+            skippedCount: 0,
+            error: (err as Error).message,
+            results: [],
+          }),
+        );
       }
       return;
     }

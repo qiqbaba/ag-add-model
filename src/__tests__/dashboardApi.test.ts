@@ -207,4 +207,148 @@ describe('Dashboard and REST API endpoints', () => {
     expect(updateJson.success).toBe(true);
     expect(updateJson.count).toBe(1);
   });
+
+  describe('POST /api/models/discover', () => {
+    let stubServer: http.Server | null = null;
+    let stubPort = 0;
+    let stubBody = '{}';
+
+    beforeEach(async () => {
+      stubServer = http.createServer((req, res) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(stubBody);
+      });
+      await new Promise<void>((resolve) => {
+        stubServer!.listen(0, '127.0.0.1', () => {
+          stubPort = (stubServer!.address() as import('net').AddressInfo).port;
+          resolve();
+        });
+      });
+    });
+
+    afterEach(async () => {
+      if (stubServer) {
+        await new Promise<void>((resolve) => stubServer!.close(() => resolve()));
+        stubServer = null;
+      }
+    });
+
+    it('should discover models via POST /api/models/discover (OpenAI-compatible)', async () => {
+      stubBody = JSON.stringify({ data: [{ id: 'gpt-4o' }, { id: 'gpt-4o-mini' }] });
+      const res = await makeRequest(
+        'POST',
+        '/api/models/discover',
+        JSON.stringify({
+          apiUrl: `http://127.0.0.1:${stubPort}/v1/chat/completions`,
+          apiKey: 'sk-test',
+          provider: 'openai',
+        }),
+      );
+      expect(res.statusCode).toBe(200);
+      const json = JSON.parse(res.body);
+      expect(json.success).toBe(true);
+      expect(json.models[0].id).toBe('gpt-4o');
+    });
+
+    it('should discover models via POST /api/models/discover (Ollama)', async () => {
+      stubBody = JSON.stringify({ models: [{ name: 'llama3' }] });
+      const res = await makeRequest(
+        'POST',
+        '/api/models/discover',
+        JSON.stringify({
+          apiUrl: `http://127.0.0.1:${stubPort}/v1/chat/completions`,
+          provider: 'ollama',
+        }),
+      );
+      expect(res.statusCode).toBe(200);
+      const json = JSON.parse(res.body);
+      expect(json.success).toBe(true);
+      expect(json.models[0].id).toBe('llama3');
+    });
+
+    it('should return a structured error when apiUrl is missing', async () => {
+      const res = await makeRequest('POST', '/api/models/discover', JSON.stringify({ provider: 'openai' }));
+      expect(res.statusCode).toBe(200);
+      const json = JSON.parse(res.body);
+      expect(json.success).toBe(false);
+      expect(json.error).toContain('apiUrl');
+    });
+
+    it('should mark discovered models that already exist locally as exists=true', async () => {
+      stubBody = JSON.stringify({ data: [{ id: 'gpt-4o' }, { id: 'gpt-4o-mini' }] });
+      const res = await makeRequest(
+        'POST',
+        '/api/models/discover',
+        JSON.stringify({
+          apiUrl: `http://127.0.0.1:${stubPort}/v1/chat/completions`,
+          apiKey: 'sk-test',
+          provider: 'openai',
+        }),
+      );
+      expect(res.statusCode).toBe(200);
+      const json = JSON.parse(res.body);
+      expect(json.success).toBe(true);
+      const gpt4o = json.models.find((m: { id: string }) => m.id === 'gpt-4o');
+      const gpt4oMini = json.models.find((m: { id: string }) => m.id === 'gpt-4o-mini');
+      // The setup file pre-configures externalModelName "gpt-4o".
+      expect(gpt4o.exists).toBe(true);
+      expect(gpt4oMini.exists).toBe(false);
+    });
+  });
+
+  describe('POST /api/models/batch', () => {
+    it('should add multiple new models and skip duplicates', async () => {
+      const res = await makeRequest(
+        'POST',
+        '/api/models/batch',
+        JSON.stringify({
+          models: [
+            { name: 'models/gpt-4o', externalModelName: 'gpt-4o', provider: 'openai', apiUrl: 'https://api.openai.com/v1/chat/completions', apiKey: 'sk-proj-test123456' },
+            { name: 'models/gpt-4o-mini', externalModelName: 'gpt-4o-mini', provider: 'openai', apiUrl: 'https://api.openai.com/v1/chat/completions', apiKey: 'sk-proj-test123456', displayName: 'GPT-4o Mini' },
+            { name: 'models/claude', externalModelName: 'claude-3-5-sonnet', provider: 'anthropic', apiUrl: 'https://api.anthropic.com/v1/messages', apiKey: 'sk-ant-test', displayName: 'Claude' },
+          ],
+        }),
+      );
+      expect(res.statusCode).toBe(200);
+      const json = JSON.parse(res.body);
+      // gpt-4o already exists locally (setup) → skipped; the other two are new.
+      expect(json.success).toBe(true);
+      expect(json.addedCount).toBe(2);
+      expect(json.skippedCount).toBe(1);
+    });
+
+    it('should add a discovered-style model without an apiKey (keyless provider)', async () => {
+      const res = await makeRequest(
+        'POST',
+        '/api/models/batch',
+        JSON.stringify({
+          models: [
+            { externalModelName: 'llama3', displayName: 'Llama 3', provider: 'ollama', apiUrl: 'http://localhost:11434/v1/chat/completions', apiKey: '' },
+          ],
+        }),
+      );
+      expect(res.statusCode).toBe(200);
+      const json = JSON.parse(res.body);
+      expect(json.success).toBe(true);
+      expect(json.addedCount).toBe(1);
+      expect(json.skippedCount).toBe(0);
+    });
+
+    it('should return success (no-op) when every model already exists', async () => {
+      const res = await makeRequest(
+        'POST',
+        '/api/models/batch',
+        JSON.stringify({
+          models: [
+            { name: 'models/gpt-4o', externalModelName: 'gpt-4o', provider: 'openai', apiUrl: 'https://api.openai.com/v1/chat/completions', apiKey: 'sk-proj-test123456' },
+          ],
+        }),
+      );
+      expect(res.statusCode).toBe(200);
+      const json = JSON.parse(res.body);
+      expect(json.success).toBe(true);
+      expect(json.addedCount).toBe(0);
+      expect(json.skippedCount).toBe(1);
+    });
+  });
 });

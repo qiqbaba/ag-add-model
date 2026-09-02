@@ -282,6 +282,21 @@ export function renderDashboardHtml(): string {
       transform: translateY(-1px);
     }
 
+    /* Presets card embedded inside the Add/Edit model modal */
+    .presets-card.modal-presets {
+      margin-bottom: 0;
+      padding: 12px 14px;
+      background: rgba(0, 0, 0, 0.2);
+      border: 1px solid var(--border-subtle);
+    }
+    .presets-card.modal-presets .presets-title {
+      margin-bottom: 10px;
+    }
+    .presets-card.modal-presets .preset-chip {
+      padding: 5px 12px;
+      font-size: 0.78rem;
+    }
+
     /* ─── Controls Bar ───────────────────────────────────── */
     .controls-bar {
       display: flex;
@@ -727,6 +742,70 @@ export function renderDashboardHtml(): string {
       padding-right: 40px;
     }
 
+    /* ─── Discovered Model (batch-add) List ─────────────── */
+    .discovered-list {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      max-height: 200px;
+      overflow-y: auto;
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      background: var(--bg-surface);
+      padding: 6px;
+      margin-top: 4px;
+    }
+    .discovered-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 5px 6px;
+      border-radius: 4px;
+      background: var(--bg-surface-elevated);
+      font-size: 0.8rem;
+    }
+    .discovered-item.exists {
+      opacity: 0.6;
+    }
+    .discovered-item input[type="checkbox"] {
+      accent-color: var(--accent-indigo);
+      flex-shrink: 0;
+    }
+    .discovered-label {
+      flex: 1;
+      color: var(--text-primary);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .discovered-badge {
+      font-size: 0.68rem;
+      color: var(--accent-emerald);
+      background: rgba(16, 185, 129, 0.15);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      border-radius: 10px;
+      padding: 1px 8px;
+      flex-shrink: 0;
+    }
+    .discovered-apply {
+      background: none;
+      border: none;
+      color: var(--accent-cyan);
+      font-size: 0.74rem;
+      cursor: pointer;
+      flex-shrink: 0;
+      padding: 2px 4px;
+    }
+    .discovered-apply:hover {
+      text-decoration: underline;
+    }
+    .discovered-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 6px;
+      flex-wrap: wrap;
+    }
+
     .toggle-pwd-btn {
       position: absolute;
       right: 8px;
@@ -930,46 +1009,6 @@ export function renderDashboardHtml(): string {
 
   <!-- ─── Main Content ─────────────────────────────────────── -->
   <main>
-    <!-- Quick Presets -->
-    <div class="presets-card">
-      <div class="presets-title">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"></path><line x1="4" y1="22" x2="4" y2="15"></line></svg>
-        快速预设模板 (点击快速填表并添加)
-      </div>
-      <div class="presets-grid">
-        <button class="preset-chip" onclick="applyPreset('deepseek')">
-          <span>🚀</span> DeepSeek 官方
-        </button>
-        <button class="preset-chip" onclick="applyPreset('deepseek-r1')">
-          <span>🧠</span> DeepSeek-R1 深度思考
-        </button>
-        <button class="preset-chip" onclick="applyPreset('openai-gpt4o')">
-          <span>⚡</span> OpenAI GPT-4o
-        </button>
-        <button class="preset-chip" onclick="applyPreset('anthropic-claude')">
-          <span>👑</span> Claude 3.5 Sonnet
-        </button>
-        <button class="preset-chip" onclick="applyPreset('ollama-local')">
-          <span>🦙</span> Ollama 本地模型
-        </button>
-        <button class="preset-chip" onclick="applyPreset('openrouter')">
-          <span>🌐</span> OpenRouter 聚合
-        </button>
-        <button class="preset-chip" onclick="applyPreset('siliconflow')">
-          <span>⚡</span> 硅基流动 SiliconFlow
-        </button>
-        <button class="preset-chip" onclick="applyPreset('sensenova')">
-          <span>🌌</span> 商汤日日新 SenseNova
-        </button>
-        <button class="preset-chip" onclick="applyPreset('moonshot')">
-          <span>🌙</span> 月之暗面 Kimi
-        </button>
-        <button class="preset-chip" onclick="applyPreset('google-ai')">
-          <span>🔮</span> Google AI Studio
-        </button>
-      </div>
-    </div>
-
     <!-- Search & Filter Controls -->
     <div class="controls-bar">
       <div class="search-group">
@@ -1011,28 +1050,44 @@ export function renderDashboardHtml(): string {
         </button>
       </div>
       <div class="modal-body">
-        <div class="form-group">
-          <label class="form-label">
-            <span>显示名称 (Display Name) <span style="color: var(--accent-rose)">*</span></span>
-            <span class="form-hint">IDE 模型选择器中展示的名称</span>
-          </label>
-          <input type="text" id="form-display-name" class="form-control" placeholder="例如: DeepSeek-V3 (官方 API)" oninput="autoDeriveNames()" />
-        </div>
-
-        <div class="form-group">
-          <label class="form-label">
-            <span>内部模型标识 (Name) <span style="color: var(--accent-rose)">*</span></span>
-            <span class="form-hint">必须以 models/ 开头</span>
-          </label>
-          <input type="text" id="form-name" class="form-control" placeholder="例如: models/deepseek-v3" />
-        </div>
-
-        <div class="form-group">
-          <label class="form-label">
-            <span>外部模型名称 (External Model Name) <span style="color: var(--accent-rose)">*</span></span>
-            <span class="form-hint">发送给上游 API 的实际 model 参数</span>
-          </label>
-          <input type="text" id="form-external-name" class="form-control" placeholder="例如: deepseek-chat, gpt-4o, claude-3-5-sonnet-20241022" />
+        <!-- Quick Presets (merged from main page) -->
+        <div class="presets-card modal-presets">
+          <div class="presets-title">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"></path><line x1="4" y1="22" x2="4" y2="15"></line></svg>
+            快速预设模板 (点击快速填表)
+          </div>
+          <div class="presets-grid">
+            <button class="preset-chip" onclick="applyPreset('deepseek')">
+              <span>🚀</span> DeepSeek 官方
+            </button>
+            <button class="preset-chip" onclick="applyPreset('deepseek-r1')">
+              <span>🧠</span> DeepSeek-R1 深度思考
+            </button>
+            <button class="preset-chip" onclick="applyPreset('openai-gpt4o')">
+              <span>⚡</span> OpenAI GPT-4o
+            </button>
+            <button class="preset-chip" onclick="applyPreset('anthropic-claude')">
+              <span>👑</span> Claude 3.5 Sonnet
+            </button>
+            <button class="preset-chip" onclick="applyPreset('ollama-local')">
+              <span>🦙</span> Ollama 本地模型
+            </button>
+            <button class="preset-chip" onclick="applyPreset('openrouter')">
+              <span>🌐</span> OpenRouter 聚合
+            </button>
+            <button class="preset-chip" onclick="applyPreset('siliconflow')">
+              <span>⚡</span> 硅基流动 SiliconFlow
+            </button>
+            <button class="preset-chip" onclick="applyPreset('sensenova')">
+              <span>🌌</span> 商汤日日新 SenseNova
+            </button>
+            <button class="preset-chip" onclick="applyPreset('moonshot')">
+              <span>🌙</span> 月之暗面 Kimi
+            </button>
+            <button class="preset-chip" onclick="applyPreset('google-ai')">
+              <span>🔮</span> Google AI Studio
+            </button>
+          </div>
         </div>
 
         <div class="form-group">
@@ -1054,7 +1109,16 @@ export function renderDashboardHtml(): string {
             <span>完整 API URL <span style="color: var(--accent-rose)">*</span></span>
             <span class="form-hint">需包含完整端点路径</span>
           </label>
-          <input type="text" id="form-api-url" class="form-control" placeholder="例如: https://api.deepseek.com/v1/chat/completions" />
+          <div style="display: flex; gap: 8px;">
+          <input type="text" id="form-api-url" class="form-control" placeholder="例如: https://api.deepseek.com/v1/chat/completions" style="flex: 1;" />
+          <button type="button" id="btn-discover-models" class="btn btn-secondary" onclick="discoverModelsFromUrl()">自动获取模型</button>
+        </div>
+        <div id="discovered-model-list" class="discovered-list" style="display: none;"></div>
+        <div id="discovered-model-actions" class="discovered-actions" style="display: none;">
+          <button type="button" class="btn btn-secondary" onclick="selectAllDiscovered()" id="btn-select-all">全选未添加</button>
+          <button type="button" class="btn btn-secondary" onclick="clearDiscoveredSelection()">取消全选</button>
+          <button type="button" class="btn btn-primary" onclick="batchAddDiscovered()" id="btn-batch-add">批量添加所选 (0)</button>
+        </div>
         </div>
 
         <div class="form-group">
@@ -1068,6 +1132,30 @@ export function renderDashboardHtml(): string {
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
             </button>
           </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">
+            <span>显示名称 (Display Name) <span style="color: var(--accent-rose)">*</span></span>
+            <span class="form-hint">IDE 模型选择器中展示的名称</span>
+          </label>
+          <input type="text" id="form-display-name" class="form-control" placeholder="例如: DeepSeek-V3 (官方 API)" oninput="autoDeriveNames()" />
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">
+            <span>内部模型标识 (Name) <span style="color: var(--accent-rose)">*</span></span>
+            <span class="form-hint">必须以 models/ 开头（可通过上方「自动获取模型」自动填充）</span>
+          </label>
+          <input type="text" id="form-name" class="form-control" placeholder="例如: models/deepseek-v3" />
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">
+            <span>外部模型名称 (External Model Name) <span style="color: var(--accent-rose)">*</span></span>
+            <span class="form-hint">发送给上游 API 的实际 model 参数</span>
+          </label>
+          <input type="text" id="form-external-name" class="form-control" placeholder="例如: deepseek-chat, gpt-4o, claude-3-5-sonnet-20241022" />
         </div>
 
         <!-- Advanced Options Accordion -->
@@ -1201,6 +1289,7 @@ export function renderDashboardHtml(): string {
       models: [],
       systemInfo: null,
       editingIndex: -1,
+      lastDiscovered: [],
     };
 
     // ─── Initialize ──────────────────────────────────────────
@@ -1269,7 +1358,7 @@ export function renderDashboardHtml(): string {
           <div class="empty-state">
             <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"></circle><line x1="8" y1="12" x2="16" y2="12"></line></svg>
             <div class="empty-title">\${search || filterProvider !== 'all' ? '未找到符合条件的模型' : '尚未添加自定义模型'}</div>
-            <div class="empty-desc">\${search || filterProvider !== 'all' ? '请尝试更换搜索关键字或 Provider 过滤选项。' : '你可以点击上方的快速预设或【添加模型】按钮立即接入 DeepSeek、OpenAI、Claude 等大模型。'}</div>
+            <div class="empty-desc">\${search || filterProvider !== 'all' ? '请尝试更换搜索关键字或 Provider 过滤选项。' : '你可以点击【添加模型】按钮，在弹窗中直接选用快速预设模板接入 DeepSeek、OpenAI、Claude 等大模型。'}</div>
             <button class="btn btn-primary" onclick="openAddModal()">立即添加模型</button>
           </div>
         \`;
@@ -1296,14 +1385,6 @@ export function renderDashboardHtml(): string {
                 <div class="meta-row">
                   <span class="meta-label">外部模型:</span>
                   <span class="meta-val">\${escapeHtml(m.externalModelName || '(同内部名称)')}</span>
-                </div>
-                <div class="meta-row">
-                  <span class="meta-label">API URL:</span>
-                  <span class="meta-val" title="\${escapeHtml(m.apiUrl)}">\${escapeHtml(m.apiUrl)}</span>
-                </div>
-                <div class="meta-row">
-                  <span class="meta-label">API Key:</span>
-                  <span class="meta-val" style="color: \${m.hasKey ? '#34d399' : '#94a3b8'}">\${escapeHtml(m.apiKeyMasked)}</span>
                 </div>
               </div>
 
@@ -1416,6 +1497,10 @@ export function renderDashboardHtml(): string {
       document.getElementById('form-timeout').value = '';
       document.getElementById('form-max-retries').value = '';
       document.getElementById('form-test-result').style.display = 'none';
+      document.getElementById('discovered-model-list').style.display = 'none';
+      document.getElementById('discovered-model-actions').style.display = 'none';
+      document.getElementById('discovered-model-list').innerHTML = '';
+      state.lastDiscovered = [];
 
       document.getElementById('modal-model-form').classList.add('open');
     }
@@ -1465,6 +1550,209 @@ export function renderDashboardHtml(): string {
       if (!nameInput.value || nameInput.value.startsWith('models/')) {
         nameInput.value = 'models/' + (slug || 'custom-model');
       }
+    }
+
+    async function discoverModelsFromUrl() {
+      const box = document.getElementById('form-test-result');
+      const list = document.getElementById('discovered-model-list');
+      const actions = document.getElementById('discovered-model-actions');
+      const btn = document.getElementById('btn-discover-models');
+      const apiUrl = document.getElementById('form-api-url').value.trim();
+      const apiKey = document.getElementById('form-api-key').value.trim();
+      const provider = document.getElementById('form-provider').value;
+      const allowUnauthorized = document.getElementById('form-allow-unauthorized').checked;
+
+      // API Key is optional for discovery: keyless providers (e.g. local Ollama)
+      // or endpoints that expose /models without auth are still discoverable.
+      if (!apiUrl) { showToast('请先填写完整 API URL', 'error'); return; }
+
+      list.style.display = 'none';
+      actions.style.display = 'none';
+      box.className = 'test-result-box testing';
+      box.innerHTML = '<span class="spinner"></span> <span>正在探测模型列表...</span>';
+      box.style.display = 'flex';
+      btn.disabled = true;
+
+      try {
+        const res = await fetch('/api/models/discover', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ apiUrl, apiKey, provider, allowUnauthorized }),
+        });
+        const result = await res.json();
+
+        if (result.success && result.models && result.models.length > 0) {
+          state.lastDiscovered = result.models;
+          renderDiscoveredModels(result.models);
+          const existsCount = result.models.filter(m => m.exists).length;
+          list.style.display = 'block';
+          actions.style.display = 'flex';
+          box.style.display = 'none';
+          showToast('成功获取 ' + result.models.length + ' 个模型' + (existsCount ? ('，其中 ' + existsCount + ' 个已本地添加') : '') + '，请勾选要添加的模型', 'success');
+        } else {
+          state.lastDiscovered = [];
+          list.innerHTML = '';
+          box.className = 'test-result-box error';
+          box.innerHTML = '<div class="test-header"><span>🔴 ' + escapeHtml(result.error || '获取失败') + '</span></div>' +
+            '<div class="test-detail">' + escapeHtml(result.suggestion || result.details || '') + '</div>';
+          box.style.display = 'flex';
+        }
+      } catch (err) {
+        box.className = 'test-result-box error';
+        box.innerHTML = '<div class="test-header"><span>🔴 网络错误</span></div><div class="test-detail">' + escapeHtml(err.message) + '</div>';
+        box.style.display = 'flex';
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    function renderDiscoveredModels(models) {
+      const list = document.getElementById('discovered-model-list');
+      list.innerHTML = '';
+      models.forEach(function (m) {
+        const row = document.createElement('div');
+        row.className = 'discovered-item' + (m.exists ? ' exists' : '');
+
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.className = 'discovered-check';
+        cb.value = m.id;
+        cb.disabled = !!m.exists;
+        cb.dataset.displayName = m.displayName || '';
+        cb.onchange = updateBatchButton;
+        row.appendChild(cb);
+
+        const label = document.createElement('span');
+        label.className = 'discovered-label';
+        label.textContent = (m.displayName || m.id) + ' (' + m.id + ')';
+        label.title = m.id;
+        row.appendChild(label);
+
+        if (m.exists) {
+          const badge = document.createElement('span');
+          badge.className = 'discovered-badge';
+          badge.textContent = '已添加';
+          row.appendChild(badge);
+        } else {
+          const applyBtn = document.createElement('button');
+          applyBtn.type = 'button';
+          applyBtn.className = 'discovered-apply';
+          applyBtn.textContent = '应用到表单';
+          applyBtn.onclick = function () { applyDiscoveredModel(m.id, m.displayName || m.id); };
+          row.appendChild(applyBtn);
+        }
+
+        list.appendChild(row);
+      });
+      updateBatchButton();
+    }
+
+    function updateBatchButton() {
+      const checks = document.querySelectorAll('#discovered-model-list .discovered-check:not(:disabled)');
+      let count = 0;
+      checks.forEach(function (c) { if (c.checked) count++; });
+      document.getElementById('btn-batch-add').textContent = '批量添加所选 (' + count + ')';
+    }
+
+    function selectAllDiscovered() {
+      document.querySelectorAll('#discovered-model-list .discovered-check:not(:disabled)').forEach(function (c) { c.checked = true; });
+      updateBatchButton();
+      showToast('已全选未添加的模型', 'success');
+    }
+
+    function clearDiscoveredSelection() {
+      document.querySelectorAll('#discovered-model-list .discovered-check').forEach(function (c) { c.checked = false; });
+      updateBatchButton();
+    }
+
+    function slugifyDiscovered(id) {
+      return (id || 'custom-model')
+        .replace(/^models\\//, '')
+        .replace(/[^a-zA-Z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .toLowerCase() || 'custom-model';
+    }
+
+    async function batchAddDiscovered() {
+      const selected = [];
+      document.querySelectorAll('#discovered-model-list .discovered-check:checked').forEach(function (c) {
+        selected.push({ id: c.value, displayName: c.dataset.displayName || c.value });
+      });
+      if (selected.length === 0) {
+        showToast('请先勾选要批量添加的模型', 'error');
+        return;
+      }
+
+      const provider = document.getElementById('form-provider').value;
+      const apiUrl = document.getElementById('form-api-url').value.trim();
+      const apiKey = document.getElementById('form-api-key').value.trim();
+      const allowUnauthorized = document.getElementById('form-allow-unauthorized').checked;
+      const timeout = parseInt(document.getElementById('form-timeout').value, 10) || undefined;
+      const maxRetries = document.getElementById('form-max-retries').value !== '' ? parseInt(document.getElementById('form-max-retries').value, 10) : undefined;
+
+      const models = selected.map(function (m) {
+        return {
+          externalModelName: m.id,
+          displayName: m.displayName || m.id,
+          name: 'models/' + slugifyDiscovered(m.id),
+          provider: provider,
+          apiUrl: apiUrl,
+          apiKey: apiKey,
+          allowUnauthorized: allowUnauthorized,
+          timeout: timeout,
+          maxRetries: maxRetries,
+        };
+      });
+
+      const btn = document.getElementById('btn-batch-add');
+      btn.disabled = true;
+      const origText = btn.textContent;
+      btn.textContent = '正在添加...';
+
+      try {
+        const res = await fetch('/api/models/batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ models: models }),
+        });
+        const json = await res.json();
+        if (res.ok && json.success) {
+          showToast('成功添加 ' + json.addedCount + ' 个模型' + (json.skippedCount ? '，跳过 ' + json.skippedCount + ' 个已存在的' : '') + '！', 'success');
+          document.getElementById('discovered-model-list').innerHTML = '';
+          document.getElementById('discovered-model-list').style.display = 'none';
+          document.getElementById('discovered-model-actions').style.display = 'none';
+          state.lastDiscovered = [];
+          closeAddModal();
+          await fetchModels();
+        } else {
+          showToast('批量添加失败: ' + (json.error || '未知错误'), 'error');
+        }
+      } catch (e) {
+        showToast('批量添加请求失败: ' + e.message, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = origText;
+      }
+    }
+
+    function applyDiscoveredModel(id, displayName) {
+      if (!id) return;
+      document.getElementById('form-external-name').value = id;
+      const disp = document.getElementById('form-display-name');
+      if (!disp.value) {
+        // NOTE: this inline <script> is a JS template literal, so every regex
+        // backslash must be doubled (\\) — otherwise the template literal turns
+        // /\b\w/ into a backspace + "w" and /^models\// into /^models//, which
+        // is invalid JS that kills the whole dashboard script.
+        disp.value = id.replace(/^models\\//, '').replace(/[-_]+/g, ' ').replace(/\\b\\w/g, function (c) { return c.toUpperCase(); });
+      }
+      if (displayName) disp.value = displayName;
+      // Auto-fill the internal model identifier (Name) from the discovered id.
+      const nameInput = document.getElementById('form-name');
+      if (!nameInput.value || nameInput.value.startsWith('models/')) {
+        nameInput.value = 'models/' + slugifyDiscovered(id);
+      }
+      showToast('已自动填充外部模型名称、内部标识 (Name) 与显示名称', 'success');
     }
 
     function handleProviderChange() {

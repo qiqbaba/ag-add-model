@@ -13,6 +13,7 @@ Thumbs.db
 
 # Development artifacts
 scratch/
+.gemini/
 
 # Compiled output (TypeScript build artifacts)
 dist/

@@ -94,8 +94,9 @@ export function validateCustomModel(model: unknown): ValidationResult {
   }
 
   const name = m.name as string;
-  // Validate model name format: should start with "models/" or be a valid path
-  if (!name.startsWith('models/') && !name.includes('/')) {
+  // Validate model name format. The old condition (!startsWith && !includes)
+  // contradicted its own error message by letting any "foo/bar" through.
+  if (!name.startsWith('models/')) {
     return { valid: false, error: 'Model name must start with "models/"' };
   }
 

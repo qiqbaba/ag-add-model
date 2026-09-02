@@ -229,14 +229,22 @@ export function mapGeminiToAnthropic(
                 originalName = translatedInfo.originalName;
                 originalArgs = { CommandLine: translatedInfo.cmd, Cwd: translatedInfo.cwd };
               }
+              let parsedInput: Record<string, unknown>;
+              if (typeof originalArgs === 'string') {
+                try {
+                  parsedInput = JSON.parse(originalArgs) as Record<string, unknown>;
+                } catch (e) {
+                  log.warn('[Anthropic] Invalid tool_use args JSON, using {}:', (e as Error).message);
+                  parsedInput = {};
+                }
+              } else {
+                parsedInput = originalArgs as Record<string, unknown>;
+              }
               contentBlocks.push({
                 type: 'tool_use',
                 id: callId,
                 name: originalName,
-                input:
-                  typeof originalArgs === 'string'
-                    ? (JSON.parse(originalArgs) as Record<string, unknown>)
-                    : (originalArgs as Record<string, unknown>),
+                input: parsedInput,
               });
             }
           });
@@ -447,10 +455,16 @@ export function mapAnthropicChunkToGemini(
   chunk: AnthropicResponse,
   modelName: string,
   sessionId?: string,
+  streamKey?: string,
 ): GeminiCandidate | null {
   const stateKeyStr = stateKey(modelName, sessionId);
   const type = chunk.type;
-  const streamId = chunk.message?.id || 'anthropic_stream';
+  // Prefer the per-request streamKey (unique per upstream connection) so
+  // concurrent streams never share one context. chunk.message?.id only exists
+  // on the message_start event, so using it first would split one stream's
+  // state across two keys; the previous constant fallback ('anthropic_stream')
+  // made ALL concurrent streams share a single context.
+  const streamId = streamKey || chunk.message?.id || `${stateKeyStr}|stream`;
 
   if (!activeStreamContexts.has(streamId)) {
     activeStreamContexts.set(streamId, { accumulatedText: '', accumulatedReasoning: '', toolCalls: {} });
@@ -481,7 +495,10 @@ export function mapAnthropicChunkToGemini(
         finishReason: 'OTHER',
         index: 0,
       };
-    } else if (delta?.type === 'input_delta') {
+    } else if (delta?.type === 'input_json_delta' || delta?.type === 'input_delta') {
+      // Anthropic's real SSE delta type is 'input_json_delta' ('input_delta' is
+      // accepted for tolerance). Using the wrong name silently dropped all
+      // streamed tool-call arguments.
       if (context.toolCalls[idx]) {
         context.toolCalls[idx].arguments += delta.partial_json || '';
       }

@@ -41,9 +41,11 @@ export function getOllamaApiUrl(baseUrl: string): string {
   // Clean trailing slash
   url = url.replace(/\/$/, '');
 
-  // If no port on localhost, use default Ollama port
-  if (url.match(/^https?:\/\/localhost$/)) {
-    url = 'http://localhost:11434';
+  // If no port on localhost/127.0.0.1, use default Ollama port (keep scheme —
+  // the old regex also rewrote https://localhost to plain http).
+  const noPortMatch = url.match(/^(https?:\/\/(?:localhost|127\.0\.0\.1))$/);
+  if (noPortMatch) {
+    url = noPortMatch[1] + ':11434';
     log.info('[OllamaTranslator] Added default Ollama port 11434');
   }
 

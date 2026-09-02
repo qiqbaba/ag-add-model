@@ -326,7 +326,7 @@ describe('mapAnthropicChunkToGemini', () => {
     expect(result!.content.parts[0]).toEqual({ text: 'reasoning...', thought: true });
   });
 
-  it('should accumulate input_delta for tool arguments', () => {
+  it('should accumulate input_json_delta for tool arguments', () => {
     // Start a tool_use block
     mapAnthropicChunkToGemini(
       {
@@ -344,7 +344,7 @@ describe('mapAnthropicChunkToGemini', () => {
         message: { id: 'msg_tool' },
         type: 'content_block_delta',
         index: 0,
-        delta: { type: 'input_delta', partial_json: '{"CommandLine"' },
+        delta: { type: 'input_json_delta', partial_json: '{"CommandLine"' },
       },
       'claude-3-5-sonnet-latest',
     );
@@ -353,7 +353,7 @@ describe('mapAnthropicChunkToGemini', () => {
         message: { id: 'msg_tool' },
         type: 'content_block_delta',
         index: 0,
-        delta: { type: 'input_delta', partial_json: ':"ls"}' },
+        delta: { type: 'input_json_delta', partial_json: ':"ls"}' },
       },
       'claude-3-5-sonnet-latest',
     );

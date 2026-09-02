@@ -28,7 +28,9 @@ export interface ModelNameCapabilities {
 
 // ─── Detection ────────────────────────────────────────────────────────────
 
-const THINKING_PATTERN = /thinking|reasoning|reasoner|o1|o3|r1|opus-4|sonnet-4|claude-4|3-7|4-7|3\.7|4\.7/i;
+// Word-bounded short tokens (o1/o3/r1) so names like "do1ma" or "groq-r1se"
+// are not misclassified as thinking models.
+const THINKING_PATTERN = /thinking|reasoning|reasoner|\bo1\b|\bo3\b|\br1\b|opus-4|sonnet-4|claude-4|3-7|4-7|3\.7|4\.7/i;
 const DEEPSEEK_PATTERN = /deepseek/i;
 const CLAUDE_PATTERN = /claude|opus|sonnet/i;
 const CLAUDE_THINKING_PATTERN = /opus-4|sonnet-4|claude-4|claude-3-5|claude-3-7/i;

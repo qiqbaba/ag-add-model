@@ -216,7 +216,10 @@ function hasUnclosedToolCallBlock(text: string): boolean {
   const fcCloses = (text.match(/<\/function_call>/g) || []).length;
   if (fcOpens > fcCloses) return true;
 
-  if (text.includes('<call:') && !text.includes('>')) return true;
+  // An opening "<call:" with no closing ">" yet (checked relative to the LAST
+  // occurrence — the old !text.includes('>') condition was virtually never true).
+  const callIdx = text.lastIndexOf('<call:');
+  if (callIdx !== -1 && text.indexOf('>', callIdx) === -1) return true;
   if (text.includes('```tool_call') && (text.match(/```/g) || []).length % 2 !== 0) return true;
 
   return false;
@@ -848,7 +851,14 @@ export function mapOpenAIToGemini(
   const parts: GeminiPart[] = [];
   if (reasoningFromMessage) parts.push({ text: reasoningFromMessage, thought: true });
   if (text) parts.push({ text });
-  const finishReason = choice?.finish_reason === 'stop' ? 'STOP' : 'OTHER';
+  const finishReasonMap: Record<string, string> = {
+    stop: 'STOP',
+    tool_calls: 'STOP',
+    function_call: 'STOP',
+    length: 'MAX_TOKENS',
+    content_filter: 'SAFETY',
+  };
+  const finishReason = finishReasonMap[choice?.finish_reason || ''] || 'OTHER';
   return {
     candidates: [{ content: { parts, role: 'model' }, finishReason, index: 0 }],
     usageMetadata: {
@@ -865,12 +875,16 @@ export function mapOpenAIChunkToGemini(
   chunk: OpenAIResponse,
   modelName: string,
   sessionId?: string,
+  streamKey?: string,
 ): GeminiCandidate | null {
   const stateKeyStr = stateKey(modelName, sessionId);
   const choice = chunk.choices?.[0];
   if (!choice) return null;
   const delta = choice.delta;
-  const streamId = ((chunk as Record<string, unknown>).id as string) || 'default_stream';
+  // Prefer the per-request streamKey so concurrent streams of the same model
+  // never share one accumulated-text/tool-call context (the old
+  // 'default_stream' fallback collapsed them together).
+  const streamId = streamKey || ((chunk as Record<string, unknown>).id as string) || `${stateKeyStr}|stream`;
 
   if (!activeStreamContexts.has(streamId)) {
     activeStreamContexts.set(streamId, { accumulatedText: '', accumulatedReasoning: '', toolCalls: {} });
@@ -911,7 +925,29 @@ export function mapOpenAIChunkToGemini(
           earliestIdx = idx;
         }
       }
-      const safePrefix = earliestIdx >= 0 ? text.slice(0, earliestIdx) : text;
+      let safePrefix = earliestIdx >= 0 ? text.slice(0, earliestIdx) : text;
+      if (earliestIdx === -1) {
+        // A tool-call marker may be split across chunk boundaries (e.g. chunk
+        // ends with "<tool_" and the next chunk starts with "call>"). Hold back
+        // the trailing partial-marker suffix so it never leaks as visible text;
+        // it stays in accumulatedText and is re-evaluated with the next delta.
+        let holdLen = 0;
+        for (const marker of TOOL_CALL_START_MARKERS) {
+          const maxCheck = Math.min(marker.length - 1, text.length);
+          for (let len = maxCheck; len > holdLen; len--) {
+            if (text.endsWith(marker.slice(0, len))) {
+              holdLen = len;
+              break;
+            }
+          }
+        }
+        if (holdLen > 0) {
+          safePrefix = safePrefix.slice(0, safePrefix.length - holdLen);
+          context.pendingHeldSuffix = text.slice(text.length - holdLen);
+        } else {
+          delete context.pendingHeldSuffix;
+        }
+      }
       if (safePrefix) emitParts.push({ text: safePrefix });
     }
   }
@@ -957,7 +993,9 @@ export function mapOpenAIChunkToGemini(
   const finishReason = choice.finish_reason;
   if (finishReason === 'stop' || finishReason === 'length') {
     // Check for pending native tool_calls before closing stream
-    const pendingToolCalls = Object.values(context.toolCalls).filter((tc) => tc.name && tc.arguments);
+    // A tool call with empty arguments ("{}"/"") is still a valid no-arg call —
+    // don't filter it out (JSON.parse falls back to {} below).
+    const pendingToolCalls = Object.values(context.toolCalls).filter((tc) => tc.name);
     if (pendingToolCalls.length > 0) {
       const parts: GeminiPart[] = emitParts.slice();
       for (const tc of pendingToolCalls) {
@@ -1020,8 +1058,18 @@ export function mapOpenAIChunkToGemini(
         return { content: { parts, role: 'model' }, finishReason: 'STOP', index: 0 };
       }
     }
+    // Flush any held-back partial marker that turned out to be plain text
+    // (it was withheld only to prevent markup leakage, not to be dropped).
+    if (context.pendingHeldSuffix) {
+      emitParts.push({ text: context.pendingHeldSuffix });
+      delete context.pendingHeldSuffix;
+    }
     activeStreamContexts.delete(streamId);
-    return { content: { parts: emitParts, role: 'model' }, finishReason: 'STOP', index: 0 };
+    return {
+      content: { parts: emitParts, role: 'model' },
+      finishReason: finishReason === 'length' ? 'MAX_TOKENS' : 'STOP',
+      index: 0,
+    };
   }
 
   // Only emit tool calls when finishReason signals completion (args are fully accumulated)

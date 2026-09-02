@@ -99,7 +99,7 @@ export function generatePlaceholderId(model: CustomModel): string {
   let hash = 5381;
   for (let i = 0; i < input.length; i++) {
     hash = (hash << 5) + hash + input.charCodeAt(i);
-    hash = hash & hash;
+    hash = hash | 0;
   }
   const placeholderNum = 400 + (Math.abs(hash) % 200);
   return `MODEL_PLACEHOLDER_M${placeholderNum}`;
@@ -122,22 +122,64 @@ export function generateSlug(model: CustomModel): string {
 }
 
 /**
- * Reads and decrypts models from custom_models.json.
+ * Atomically writes content to a file (write temp + rename) so a crash or
+ * power loss mid-write can never leave a truncated/corrupt config file.
  */
-export function readDecryptedModels(): CustomModel[] {
+function writeFileAtomic(filePath: string, content: string): void {
+  const tmpPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tmpPath, content, 'utf-8');
+  fs.renameSync(tmpPath, filePath);
+}
+
+interface ReadModelsResult {
+  models: CustomModel[];
+  /** Set when the on-disk file exists but could not be read/parsed. */
+  parseError?: string;
+}
+
+/**
+ * Reads and decrypts models, distinguishing "no file" from "corrupt file".
+ * Write paths MUST check parseError and abort — treating corruption as an
+ * empty list would overwrite and destroy the user's entire configuration.
+ */
+function readModelsFile(): ReadModelsResult {
   const filePath = getCustomModelsPath();
   if (!fs.existsSync(filePath)) {
-    return [];
+    return { models: [] };
   }
   try {
     const content = fs.readFileSync(filePath, 'utf-8');
     const parsed = JSON.parse(content) as { models?: CustomModel[] };
     const rawModels = parsed.models || [];
-    return cryptoStore.decryptModels<CustomModel>(rawModels);
+    return { models: cryptoStore.decryptModels<CustomModel>(rawModels) };
   } catch (err) {
     console.error('[ModelConfigManager] Failed to read/parse custom_models.json:', err);
-    return [];
+    return { models: [], parseError: (err as Error).message };
   }
+}
+
+/**
+ * Reads and decrypts models from custom_models.json.
+ * Read-only view: corrupt files degrade to an empty list (UI stays usable).
+ */
+export function readDecryptedModels(): CustomModel[] {
+  return readModelsFile().models;
+}
+
+/**
+ * Guards a write path: returns an error message when persisting `models`
+ * would destroy data (corrupt source file, or credentials that failed to
+ * decrypt and must not be re-encrypted over their intact on-disk ciphertext).
+ */
+function getWriteBlocker(models: CustomModel[], parseError?: string): string | null {
+  if (parseError) {
+    return `配置文件 custom_models.json 解析失败（${parseError}），已中止写入以避免清空全部模型配置。请修复文件或从 .bak 备份恢复后重试。`;
+  }
+  const bad = models.find((m) => cryptoStore.isDecryptionFailure(m.apiKey));
+  if (bad) {
+    return `模型 "${bad.name}" 的 API Key 解密失败（可能因跨机器迁移或系统密钥环不可用）。已中止写入以保护磁盘上的原始加密凭据。请重新填写该模型的 API Key 后再保存。`;
+  }
+  return null;
 }
 
 /**
@@ -206,10 +248,10 @@ export function saveCustomModel(modelData: Partial<CustomModel>): {
   error?: string;
   model?: ModelViewModel;
 } {
-  // Ensure name starts with "models/"
+  // Ensure name starts with "models/" (validator now enforces this strictly)
   let name = (modelData.name || '').trim();
-  if (name && !name.startsWith('models/') && !name.includes('/')) {
-    name = 'models/' + name;
+  if (name && !name.startsWith('models/')) {
+    name = 'models/' + name.replace(/^\/+/, '');
   }
 
   const model: CustomModel = {
@@ -236,7 +278,8 @@ export function saveCustomModel(modelData: Partial<CustomModel>): {
     fs.mkdirSync(dir, { recursive: true });
   }
 
-  const currentModels = readDecryptedModels();
+  const readResult = readModelsFile();
+  const currentModels = readResult.models;
   const existingIndex = currentModels.findIndex((m) => m.name === model.name);
 
   if (existingIndex >= 0) {
@@ -249,10 +292,15 @@ export function saveCustomModel(modelData: Partial<CustomModel>): {
     currentModels.push(model);
   }
 
+  const blocker = getWriteBlocker(currentModels, readResult.parseError);
+  if (blocker) {
+    return { success: false, error: blocker };
+  }
+
   try {
     cryptoStore.backupFile(filePath);
     const encrypted = cryptoStore.encryptModels(currentModels);
-    fs.writeFileSync(filePath, JSON.stringify({ models: encrypted }, null, 2), 'utf-8');
+    writeFileAtomic(filePath, JSON.stringify({ models: encrypted }, null, 2));
     const viewModels = getModelsViewModel();
     const updatedVm = viewModels.find((v) => v.name === model.name);
     return { success: true, model: updatedVm };
@@ -262,11 +310,132 @@ export function saveCustomModel(modelData: Partial<CustomModel>): {
 }
 
 /**
+ * Batch-saves multiple custom models (used by the discover + batch-add flow).
+ *
+ * Adds only models that are not already present locally, skipping duplicates
+ * (dedup by `name` and by `externalModelName`), and persists all accepted
+ * models in a single atomic write. Existing models are never overwritten.
+ */
+export function saveCustomModels(modelList: Partial<CustomModel>[]): {
+  success: boolean;
+  addedCount: number;
+  skippedCount: number;
+  error?: string;
+  results: { name: string; externalModelName?: string; success: boolean; skipped?: boolean; error?: string }[];
+} {
+  const results: { name: string; externalModelName?: string; success: boolean; skipped?: boolean; error?: string }[] = [];
+  if (!Array.isArray(modelList) || modelList.length === 0) {
+    return { success: false, addedCount: 0, skippedCount: 0, error: '未提供任何待添加的模型', results };
+  }
+
+  const readResult = readModelsFile();
+  const currentModels = readResult.models;
+  const existingNames = new Set<string>(currentModels.map((m) => m.name));
+  const existingExternal = new Set<string>(
+    currentModels.map((m) => (m.externalModelName || '').toLowerCase()).filter(Boolean),
+  );
+
+  const accepted: CustomModel[] = [];
+  const acceptedNames = new Set<string>();
+  let skippedCount = 0;
+
+  for (const item of modelList) {
+    // Normalize name to "models/" prefix (validator enforces this strictly).
+    let name = (item.name || '').trim();
+    if (name && !name.startsWith('models/')) {
+      name = 'models/' + name.replace(/^\/+/, '');
+    }
+
+    const externalModelName = (item.externalModelName || '').trim();
+    const cleanExternal = externalModelName.toLowerCase();
+    const dupByName = !!name && (existingNames.has(name) || acceptedNames.has(name));
+    const dupByExternal =
+      !!cleanExternal &&
+      (existingExternal.has(cleanExternal) || accepted.some((a) => (a.externalModelName || '').toLowerCase() === cleanExternal));
+
+    if (dupByName || dupByExternal) {
+      skippedCount++;
+      results.push({ name, externalModelName, success: false, skipped: true, error: '已存在于本地配置，已跳过' });
+      continue;
+    }
+
+    const model: CustomModel = {
+      name: name || 'models/' + slugify(externalModelName || 'custom-model'),
+      displayName: (item.displayName || externalModelName || name || 'custom-model').trim(),
+      description: (item.description || '').trim(),
+      provider: (item.provider || 'openai').trim().toLowerCase(),
+      apiKey: item.apiKey !== undefined ? item.apiKey.trim() : '',
+      apiUrl: (item.apiUrl || '').trim(),
+      externalModelName: externalModelName || (item.name || '').replace(/^models\//, ''),
+      allowUnauthorized: !!item.allowUnauthorized,
+      timeout: item.timeout ? Number(item.timeout) : undefined,
+      maxRetries: item.maxRetries !== undefined ? Number(item.maxRetries) : undefined,
+    };
+
+    const validation = validateCustomModel(model);
+    if (!validation.valid) {
+      results.push({ name: model.name, externalModelName: model.externalModelName, success: false, error: validation.error || '校验失败' });
+      continue;
+    }
+
+    // Ensure a unique name within this batch (append suffix on collision).
+    let finalName = model.name;
+    let counter = 2;
+    while (acceptedNames.has(finalName)) {
+      finalName = `${model.name}-${counter}`;
+      counter++;
+    }
+    model.name = finalName;
+    acceptedNames.add(finalName);
+    accepted.push(model);
+    results.push({ name: model.name, externalModelName: model.externalModelName, success: true });
+  }
+
+  if (accepted.length === 0) {
+    // Distinguish "everything was a duplicate" (successful no-op) from "some
+    // models failed validation" (a real error the user should fix/see).
+    const hasValidationError = results.some((r) => r.success === false && !r.skipped);
+    if (hasValidationError) {
+      return { success: false, addedCount: 0, skippedCount, error: '部分模型校验未通过，未新增任何模型', results };
+    }
+    return { success: true, addedCount: 0, skippedCount, results };
+  }
+
+  const blocker = getWriteBlocker([...currentModels, ...accepted], readResult.parseError);
+  if (blocker) {
+    return { success: false, addedCount: 0, skippedCount, error: blocker, results };
+  }
+
+  const filePath = getCustomModelsPath();
+  try {
+    cryptoStore.backupFile(filePath);
+    const allModels = [...currentModels, ...accepted];
+    const encrypted = cryptoStore.encryptModels(allModels);
+    writeFileAtomic(filePath, JSON.stringify({ models: encrypted }, null, 2));
+    return { success: true, addedCount: accepted.length, skippedCount, results };
+  } catch (err) {
+    return { success: false, addedCount: 0, skippedCount, error: `保存失败: ${(err as Error).message}`, results };
+  }
+}
+
+/** Slugifies a model id/name into a URL-safe token (e.g. "gpt-4o"). */
+function slugify(input: string): string {
+  return (
+    input
+      .replace(/^models\//, '')
+      .replace(/[^a-zA-Z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .toLowerCase() || 'custom-model'
+  );
+}
+
+/**
  * Deletes a custom model by name.
  */
 export function deleteCustomModel(modelName: string): { success: boolean; error?: string; remainingCount: number } {
   const filePath = getCustomModelsPath();
-  const currentModels = readDecryptedModels();
+  const readResult = readModelsFile();
+  const currentModels = readResult.models;
   const cleanTarget = modelName.trim();
 
   const filtered = currentModels.filter(
@@ -277,10 +446,15 @@ export function deleteCustomModel(modelName: string): { success: boolean; error?
     return { success: false, error: `未找到模型: ${modelName}`, remainingCount: currentModels.length };
   }
 
+  const delBlocker = getWriteBlocker(filtered, readResult.parseError);
+  if (delBlocker) {
+    return { success: false, error: delBlocker, remainingCount: currentModels.length };
+  }
+
   try {
     cryptoStore.backupFile(filePath);
     const encrypted = cryptoStore.encryptModels(filtered);
-    fs.writeFileSync(filePath, JSON.stringify({ models: encrypted }, null, 2), 'utf-8');
+    writeFileAtomic(filePath, JSON.stringify({ models: encrypted }, null, 2));
     return { success: true, remainingCount: filtered.length };
   } catch (err) {
     return { success: false, error: `删除失败: ${(err as Error).message}`, remainingCount: currentModels.length };
@@ -328,8 +502,12 @@ export function saveRawConfig(rawJson: string): { success: boolean; error?: stri
     cryptoStore.backupFile(filePath);
     // Decrypt then encrypt to ensure consistent safeStorage encryption
     const decrypted = cryptoStore.decryptModels(parsed.models as CustomModel[]);
+    const rawBlocker = getWriteBlocker(decrypted);
+    if (rawBlocker) {
+      return { success: false, error: rawBlocker };
+    }
     const encrypted = cryptoStore.encryptModels(decrypted);
-    fs.writeFileSync(filePath, JSON.stringify({ models: encrypted }, null, 2), 'utf-8');
+    writeFileAtomic(filePath, JSON.stringify({ models: encrypted }, null, 2));
     return { success: true, count: encrypted.length };
   } catch (err) {
     return { success: false, error: `写入文件失败: ${(err as Error).message}` };

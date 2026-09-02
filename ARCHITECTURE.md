@@ -424,8 +424,10 @@ OpenAI 兼容自定义模型（`openai` / `custom` / `openrouter` / `ollama` 等
 | `GET` | `/api/status` | 获取代理运行状态（端口、内存占用、加密状态、配置路径等） |
 | `GET` | `/api/models` | 获取模型列表视图（含脱敏 API Key、能力元数据与 Schema 校验状态） |
 | `POST` | `/api/models` | 新增或更新自定义模型（自动 Schema 校验、加密与文件备份） |
+| `POST` | `/api/models/batch` | 批量新增自定义模型：按 `name`/`externalModelName` 对本地去重并跳过重复项，单次原子写入（用于「自动获取模型 → 批量添加」流程） |
 | `DELETE`| `/api/models` | 删除指定模型配置 |
 | `POST` | `/api/models/test` | 对指定模型配置执行连通性探测，返回延迟与诊断信息 |
+| `POST` | `/api/models/discover` | 探测上游 `/models` 接口并返回模型列表；每个模型标注 `exists`（是否已在本地配置）便于前端去重展示 |
 | `GET` | `/api/models/raw` | 读取 `custom_models.json` 原始 JSON 字符串 |
 | `PUT` | `/api/models/raw` | 校验并覆盖写入 `custom_models.json` |
 

@@ -314,7 +314,9 @@ export function normalizeToolArgs(
     }
   }
 
-  if (!normalized[config.primaryKey]) {
+  // Only fall back when the primary key is truly absent — a legitimate empty
+  // string value must not be overwritten by the heuristic fallback.
+  if (normalized[config.primaryKey] === undefined) {
     const unassigned = Object.entries(args).filter(([k]) => !usedKeys.has(k));
     let found = unassigned.find(
       ([, v]) => typeof v === 'string' && (v.includes('/') || v.includes('\\') || v.includes('.')),
@@ -463,7 +465,9 @@ export function translateToolCallToNative(name: string, args: ToolCallArgs): Tra
   }
 
   // 2b. write_file translation (echo redirect)
-  const echoRedirectMatch = /^(echo|printf)\s+(.+?)\s*>\s*(.+)$/i.exec(cmd);
+  // Note: `>>?` must consume BOTH '>' chars of an append redirect, otherwise
+  // `echo hi >> out.txt` parses the file path as "> out.txt".
+  const echoRedirectMatch = /^(echo|printf)\s+(.+?)\s*>>?\s*(.+)$/i.exec(cmd);
   if (echoRedirectMatch) {
     const content = echoRedirectMatch[2].replace(/^["']|["']$/g, '');
     const filePath = echoRedirectMatch[3].trim();

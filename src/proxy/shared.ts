@@ -11,6 +11,8 @@ export interface StreamContext {
   toolCalls: Record<number, { id: string; name: string; arguments: string }>;
   hasEmittedToolCall?: boolean;
   terminalFinishReason?: string;
+  /** Trailing partial tool-call marker held back to avoid leaking markup; flushed at stream end if it turns out to be plain text. */
+  pendingHeldSuffix?: string;
 }
 
 export interface StateTimestamps {

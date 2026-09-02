@@ -17,13 +17,13 @@ import log from 'electron-log';
 export interface TranslatorModule {
   mapGeminiToOpenAI?: (body: unknown, modelName: string, sessionId?: string) => unknown;
   mapOpenAIToGemini?: (res: unknown, modelName: string, sessionId?: string) => unknown;
-  mapOpenAIChunkToGemini?: (chunk: unknown, modelName: string, sessionId?: string) => unknown | null;
+  mapOpenAIChunkToGemini?: (chunk: unknown, modelName: string, sessionId?: string, streamKey?: string) => unknown | null;
   mapGeminiToAnthropic?: (body: unknown, modelName: string, sessionId?: string) => unknown;
   mapAnthropicToGemini?: (res: unknown, modelName: string, sessionId?: string) => unknown;
-  mapAnthropicChunkToGemini?: (chunk: unknown, modelName: string, sessionId?: string) => unknown | null;
+  mapAnthropicChunkToGemini?: (chunk: unknown, modelName: string, sessionId?: string, streamKey?: string) => unknown | null;
   mapGeminiToGoogle?: (body: unknown, modelName: string, sessionId?: string) => unknown;
   mapGoogleToGemini?: (res: unknown, modelName: string, sessionId?: string) => unknown;
-  mapGoogleChunkToGemini?: (chunk: unknown, modelName: string, sessionId?: string) => unknown | null;
+  mapGoogleChunkToGemini?: (chunk: unknown, modelName: string, sessionId?: string, streamKey?: string) => unknown | null;
   getGoogleApiUrl?: (baseUrl: string, modelName: string, isStream: boolean) => string;
   [key: string]: unknown;
 }
@@ -171,19 +171,25 @@ export function translateResponse(
   return providerRes;
 }
 
-export function translateStreamChunk(provider: string, chunk: unknown, modelName: string, sessionId?: string): unknown {
+export function translateStreamChunk(
+  provider: string,
+  chunk: unknown,
+  modelName: string,
+  sessionId?: string,
+  streamKey?: string,
+): unknown {
   const t = getTranslator(provider);
 
   if (provider === 'google')
-    return t?.mapGoogleChunkToGemini ? t.mapGoogleChunkToGemini(chunk, modelName, sessionId) : null;
+    return t?.mapGoogleChunkToGemini ? t.mapGoogleChunkToGemini(chunk, modelName, sessionId, streamKey) : null;
   if (OPENAI_COMPAT.has(provider))
-    return t?.mapOpenAIChunkToGemini ? t.mapOpenAIChunkToGemini(chunk, modelName, sessionId) : null;
+    return t?.mapOpenAIChunkToGemini ? t.mapOpenAIChunkToGemini(chunk, modelName, sessionId, streamKey) : null;
   if (ANTHROPIC_COMPAT.has(provider))
-    return t?.mapAnthropicChunkToGemini ? t.mapAnthropicChunkToGemini(chunk, modelName, sessionId) : null;
+    return t?.mapAnthropicChunkToGemini ? t.mapAnthropicChunkToGemini(chunk, modelName, sessionId, streamKey) : null;
 
   const fnName = `map${provider.charAt(0).toUpperCase() + provider.slice(1)}ChunkToGemini`;
   if (t && typeof t[fnName] === 'function') {
-    return (t[fnName] as (...args: unknown[]) => unknown)(chunk, modelName, sessionId);
+    return (t[fnName] as (...args: unknown[]) => unknown)(chunk, modelName, sessionId, streamKey);
   }
 
   return null;
@@ -195,7 +201,7 @@ export function getProviderHeaders(provider: string, apiKey: string): ProviderHe
 
   if (provider === 'anthropic' || ANTHROPIC_COMPAT.has(provider)) {
     headers['x-api-key'] = apiKey;
-    headers['anthropic-version'] = '2025-04-01';
+    headers['anthropic-version'] = '2023-06-01';
   } else if (provider === 'google') {
     headers['x-goog-api-key'] = apiKey;
   } else if (provider === 'openrouter') {

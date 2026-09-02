@@ -57,7 +57,7 @@ function normalizeOpenAiUrl(apiUrl: string, isOllama = false): string {
 /**
  * Executes a network request with timeout and error handling.
  */
-function makeHttpRequest(
+export function makeHttpRequest(
   targetUrl: string,
   options: https.RequestOptions,
   bodyData: string | null,
@@ -84,6 +84,11 @@ function makeHttpRequest(
     const req = client.request(reqOptions, (res) => {
       const chunks: Buffer[] = [];
       res.on('data', (c: Buffer) => chunks.push(c));
+      // The response stream can also fail mid-flight (TLS reset etc.) — without
+      // this listener Node raises an uncaught 'error' event on the stream.
+      res.on('error', (err) => {
+        reject(err);
+      });
       res.on('end', () => {
         const fullBody = Buffer.concat(chunks).toString('utf-8');
         resolve({
@@ -299,10 +304,9 @@ export async function testModelConnection(params: TestConnectionParams): Promise
           ? `${cleanBase}:generateContent`
           : `${cleanBase}/models/${modelName}:generateContent`;
       }
-      if (apiKey && apiKey !== 'none' && !targetUrl.includes('key=')) {
-        const joiner = targetUrl.includes('?') ? '&' : '?';
-        targetUrl += `${joiner}key=${encodeURIComponent(apiKey)}`;
-      }
+      // NOTE: the API key is sent ONLY via the x-goog-api-key header below.
+      // It must not be appended as ?key= query param — URLs end up in proxy
+      // and access logs, leaking credentials.
 
       const body = JSON.stringify({
         contents: [{ parts: [{ text: 'Hi' }] }],

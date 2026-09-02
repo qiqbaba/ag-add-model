@@ -86,16 +86,29 @@ export function decryptString(encryptedText: string): string {
     }
   } else if (encryptedText.startsWith('fallback:')) {
     const base64Data = encryptedText.substring(9);
-    try {
-      return Buffer.from(base64Data, 'base64').toString('utf-8');
-    } catch (err) {
-      console.error('[CryptoStore] Fallback base64 decryption failed:', err);
+    // Buffer.from(..., 'base64') never throws on invalid input — it silently
+    // produces garbage. Round-trip validation is the only reliable check.
+    const buf = Buffer.from(base64Data, 'base64');
+    const roundTrip = buf.toString('base64').replace(/=+$/, '');
+    if (roundTrip !== base64Data.replace(/=+$/, '')) {
+      console.error('[CryptoStore] Fallback base64 data is corrupt.');
       return 'DECRYPTION_FAILED';
     }
+    return buf.toString('utf-8');
   }
 
   // Plaintext (older config, not yet migrated)
   return encryptedText;
+}
+
+/**
+ * Returns true when the value is a decryption-failure marker produced by
+ * decryptString. Such markers must NEVER be persisted back to disk: the
+ * on-disk ciphertext is still intact and re-encrypting the marker would
+ * destroy the original credential irreversibly.
+ */
+export function isDecryptionFailure(value: string | undefined): boolean {
+  return !!value && value.startsWith('DECRYPTION_FAILED');
 }
 
 export interface ModelWithKey {
@@ -111,6 +124,11 @@ export interface ModelWithKey {
 export function encryptModels<T extends { apiKey?: string; encrypted?: boolean }>(models: T[] | null): T[] {
   if (!models || !Array.isArray(models)) return [];
   return models.map((model) => {
+    if (model.apiKey && isDecryptionFailure(model.apiKey)) {
+      // Refuse to re-encrypt a decryption-failure marker as if it were a real
+      // key — keep the marker so callers can detect and abort the write.
+      return { ...model };
+    }
     if (model.apiKey && model.apiKey !== 'none' && !model.encrypted) {
       return {
         ...model,

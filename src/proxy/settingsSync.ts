@@ -121,14 +121,6 @@ export function syncActivePort(port: number): void {
 
 // ─── JSONC helpers (comment / trailing-comma aware) ─────────────────────────
 
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function makeKeyMatcher(key: string): string {
-  return `["']${escapeRegExp(key)}["']`;
-}
-
 /**
  * Removes line and block comments, leaving strings intact. Used to validate the
  * on-disk object structure without corrupting comment-bearing JSONC.
@@ -321,8 +313,11 @@ function insertProperty(content: string, bounds: { open: number; close: number }
 
   let trailingComma = false;
   if (lastComma !== -1) {
+    // Anything after the last top-level comma that is only whitespace/comments
+    // (any number of them) means the comma is a trailing comma. The old regex
+    // allowed at most one block + one line comment and produced ",," otherwise.
     const seg = content.substring(lastComma + 1, close);
-    trailingComma = /^\s*(\/\*[\s\S]*?\*\/)?\s*(\/\/[^\n]*)?\s*$/.test(seg);
+    trailingComma = stripJsoncComments(seg).trim().length === 0;
   }
 
   const hasProps = stripJsoncComments(body).trim().length > 0;
@@ -330,8 +325,114 @@ function insertProperty(content: string, bounds: { open: number; close: number }
   let leading = '';
   if (hasProps && !trailingComma) leading = ',';
 
-  const prop = `${leading}\n    "${key}": "${value}"`;
+  const prop = `${leading}\n    ${JSON.stringify(key)}: ${JSON.stringify(value)}`;
   return content.substring(0, close) + prop + '\n' + content.substring(close);
+}
+
+/**
+ * Finds a `"key": value` pair at the top level of a JSONC document, skipping
+ * comments and string literals. A regex over raw text would happily match a
+ * commented-out stale entry (e.g. `// "jetski.cloudCodeUrl": "..."`) and
+ * rewrite the comment instead of the live setting.
+ */
+function findLiveKeyValue(
+  content: string,
+  key: string,
+): { start: number; end: number; prefixEnd: number; current: string } | null {
+  const bounds = findTopLevelObjectBounds(content);
+  if (!bounds) return null;
+
+  let i = bounds.open + 1;
+  let inLineComment = false;
+  let inBlockComment = false;
+  let depth = 0;
+  while (i < bounds.close) {
+    const ch = content[i];
+    const next = content[i + 1];
+    if (inLineComment) {
+      if (ch === '\n' || ch === '\r') inLineComment = false;
+      i++;
+      continue;
+    }
+    if (inBlockComment) {
+      if (ch === '*' && next === '/') {
+        inBlockComment = false;
+        i += 2;
+        continue;
+      }
+      i++;
+      continue;
+    }
+    if (ch === '/' && next === '/') {
+      inLineComment = true;
+      i += 2;
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      inBlockComment = true;
+      i += 2;
+      continue;
+    }
+    if (ch === '{' || ch === '[') {
+      depth++;
+      i++;
+      continue;
+    }
+    if (ch === '}' || ch === ']') {
+      depth--;
+      i++;
+      continue;
+    }
+    if (ch === '"' && depth === 0) {
+      // Parse the string token
+      let j = i + 1;
+      let token = '';
+      while (j < bounds.close) {
+        if (content[j] === '\\') {
+          token += content[j] + (content[j + 1] || '');
+          j += 2;
+          continue;
+        }
+        if (content[j] === '"') break;
+        token += content[j];
+        j++;
+      }
+      if (token === key) {
+        // Expect ":" then a value
+        let k = j + 1;
+        while (k < bounds.close && /\s/.test(content[k])) k++;
+        if (content[k] !== ':') {
+          i = j + 1;
+          continue;
+        }
+        k++;
+        while (k < bounds.close && /\s/.test(content[k])) k++;
+        const prefixEnd = k; // value starts here
+        if (content[k] === '"') {
+          let v = k + 1;
+          let val = '';
+          while (v < bounds.close) {
+            if (content[v] === '\\') {
+              v += 2;
+              continue;
+            }
+            if (content[v] === '"') break;
+            val += content[v];
+            v++;
+          }
+          return { start: i, end: v + 1, prefixEnd, current: val };
+        }
+        // Non-string value: read until , } or whitespace
+        let v = k;
+        while (v < bounds.close && !/[,\s}]/.test(content[v])) v++;
+        return { start: i, end: v, prefixEnd, current: content.substring(k, v) };
+      }
+      i = j + 1;
+      continue;
+    }
+    i++;
+  }
+  return null;
 }
 
 /**
@@ -343,18 +444,27 @@ function insertProperty(content: string, bounds: { open: number; close: number }
  * - Returns null on malformed input (caller skips the write).
  */
 export function rewriteJsoncSetting(content: string, key: string, value: string): string | null {
-  const re = new RegExp(`(${makeKeyMatcher(key)}\\s*:\\s*)(?:"([^"]*)"|'([^']*)'|([^,}\\s][^,}]*?))`);
-  const m = content.match(re);
-  if (m) {
-    const current = m[2] ?? m[3] ?? m[4];
-    if (current === value) return null; // already matches → skip write
-    const replacement = m[1] + '"' + value + '"';
-    return content.slice(0, m.index) + replacement + content.slice(m.index + m[0].length);
+  const live = findLiveKeyValue(content, key);
+  if (live) {
+    if (live.current === value) return null; // already matches → skip write
+    // Replace only the value span (from prefixEnd to end), preserving the key
+    // formatting, whitespace, and all surrounding comments.
+    return content.slice(0, live.prefixEnd) + JSON.stringify(value) + content.slice(live.end);
   }
 
   const bounds = findTopLevelObjectBounds(content);
   if (!bounds) return null;
   return insertProperty(content, bounds, key, value);
+}
+
+/**
+ * Atomically writes content to a file (write temp + rename) so a crash
+ * mid-write cannot leave a truncated settings.json for the running IDE.
+ */
+function writeFileAtomic(filePath: string, content: string): void {
+  const tmpPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tmpPath, content, 'utf-8');
+  fs.renameSync(tmpPath, filePath);
 }
 
 // ─── settings.json sync ─────────────────────────────────────────────────────
@@ -370,7 +480,7 @@ export function syncSettingsJsonTo(settingsPath: string, port: number): boolean 
 
     if (!fs.existsSync(settingsPath)) {
       fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-      fs.writeFileSync(settingsPath, `{\n    "${CLOUD_CODE_URL_KEY}": "${targetUrl}"\n}\n`, 'utf-8');
+      writeFileAtomic(settingsPath, `{\n    "${CLOUD_CODE_URL_KEY}": "${targetUrl}"\n}\n`);
       log.info(`[Proxy] Created ${settingsPath} (${CLOUD_CODE_URL_KEY} => ${targetUrl})`);
       return true;
     }
@@ -379,7 +489,7 @@ export function syncSettingsJsonTo(settingsPath: string, port: number): boolean 
     const updated = rewriteJsoncSetting(content, CLOUD_CODE_URL_KEY, targetUrl);
     if (updated === null) return false;
 
-    fs.writeFileSync(settingsPath, updated, 'utf-8');
+    writeFileAtomic(settingsPath, updated);
     log.info(`[Proxy] Synced ${settingsPath} (${CLOUD_CODE_URL_KEY} => ${targetUrl})`);
     return true;
   } catch (e) {

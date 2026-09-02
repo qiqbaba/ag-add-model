@@ -464,13 +464,22 @@ describe('mapOpenAIToGemini', () => {
     expect(result.usageMetadata!.totalTokenCount).toBe(0);
   });
 
-  it('should handle finish_reason other than stop', () => {
+  it('should map finish_reason length to MAX_TOKENS', () => {
     const res = {
       choices: [{ message: { content: 'truncated...' }, finish_reason: 'length' }],
       usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
     };
     const result = mapOpenAIToGemini(res, 'gpt-4o');
-    expect(result.candidates[0].finishReason).toBe('OTHER');
+    expect(result.candidates[0].finishReason).toBe('MAX_TOKENS');
+  });
+
+  it('should map finish_reason content_filter to SAFETY', () => {
+    const res = {
+      choices: [{ message: { content: '' }, finish_reason: 'content_filter' }],
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+    };
+    const result = mapOpenAIToGemini(res, 'gpt-4o');
+    expect(result.candidates[0].finishReason).toBe('SAFETY');
   });
 });
 
