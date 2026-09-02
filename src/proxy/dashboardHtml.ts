@@ -571,6 +571,120 @@ export function renderDashboardHtml(): string {
       border-top: 1px solid var(--border-subtle);
     }
 
+    /* ─── Platform Grouped Layout (来源平台分组) ───────────── */
+    .platform-group {
+      background: var(--bg-card);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-lg);
+      margin-bottom: 20px;
+      box-shadow: var(--shadow-sm);
+      overflow: hidden;
+      grid-column: 1 / -1; /* each platform spans the full width */
+    }
+
+    .platform-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 20px;
+      background: rgba(255, 255, 255, 0.03);
+      border-bottom: 1px solid var(--border-subtle);
+    }
+
+    .platform-name-group {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .platform-name {
+      font-size: 1.02rem;
+      font-weight: 700;
+      color: var(--text-primary);
+      letter-spacing: -0.01em;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .platform-count {
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    /* Models within a platform are laid out as a responsive grid,
+       so they read left-to-right instead of stacking into one long column. */
+    .model-rows {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+      gap: 12px;
+      padding: 16px 20px;
+    }
+
+    .model-row {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      padding: 14px 16px;
+      transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+    }
+
+    .model-row:hover {
+      border-color: rgba(99, 102, 241, 0.35);
+      background: var(--bg-card-hover);
+      transform: translateY(-1px);
+    }
+
+    .model-row-main {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      min-width: 0;
+    }
+
+    .model-row-display {
+      font-size: 0.92rem;
+      font-weight: 600;
+      color: var(--text-primary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .model-row-meta {
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .model-row-caps {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .model-row-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .model-row > .test-result-box {
+      margin-top: 2px;
+    }
+
     /* ─── Empty State ────────────────────────────────────── */
     .empty-state {
       text-align: center;
@@ -1354,6 +1468,108 @@ export function renderDashboardHtml(): string {
       }
     }
 
+    // ─── Source platform (来源平台) derivation ───────────────
+    const PLATFORM_LABELS = {
+      'api.deepseek.com': 'DeepSeek 官方',
+      'api.siliconflow.cn': '硅基流动 SiliconFlow',
+      'api.sensenova.cn': '商汤日日新 SenseNova',
+      'token.sensenova.cn': '商汤日日新 SenseNova',
+      'api.b.ai': '智源 BAAI (b.ai)',
+      'api.moonshot.cn': '月之暗面 Kimi',
+      'api.openai.com': 'OpenAI 官方',
+      'openrouter.ai': 'OpenRouter',
+      'api.anthropic.com': 'Anthropic',
+      'api.mistral.ai': 'Mistral',
+      'api.groq.com': 'Groq',
+      'api.cerebras.ai': 'Cerebras',
+      'api.fireworks.ai': 'Fireworks AI',
+      'api.together.xyz': 'Together AI',
+      'api.nvidia.com': 'NVIDIA NIM',
+      'api.bigmodel.cn': '智谱 GLM',
+      'open.bigmodel.cn': '智谱 GLM',
+      'dashscope.aliyuncs.com': '阿里百炼 DashScope',
+      'api.qwen.ai': '阿里通义 Qwen',
+      'api.minimax.chat': 'MiniMax',
+      'generativelanguage.googleapis.com': 'Google AI Studio',
+    };
+
+    function getHost(apiUrl) {
+      if (!apiUrl) return '';
+      try {
+        return new URL(apiUrl).hostname.toLowerCase();
+      } catch (e) {
+        // Malformed URL: keep it simple, treat as unknown platform.
+        return '';
+      }
+    }
+
+    function getPlatformInfo(m) {
+      const host = getHost(m.apiUrl);
+      const provider = (m.provider || '').toLowerCase();
+      if (!host) {
+        return { key: 'custom', label: '其他来源', provider: provider };
+      }
+      return { key: host, label: PLATFORM_LABELS[host] || host, provider: provider };
+    }
+
+    function providerClass(provider) {
+      return ['openai', 'anthropic', 'deepseek', 'ollama', 'google'].includes(provider) ? provider : 'custom';
+    }
+
+    function groupModels(models) {
+      const groups = {};
+      const order = [];
+      models.forEach(m => {
+        const info = getPlatformInfo(m);
+        if (!groups[info.key]) {
+          groups[info.key] = { key: info.key, label: info.label, provider: info.provider, models: [] };
+          order.push(info.key);
+        }
+        groups[info.key].models.push(m);
+      });
+      order.sort((a, b) => {
+        const ga = groups[a];
+        const gb = groups[b];
+        if (gb.models.length !== ga.models.length) return gb.models.length - ga.models.length;
+        return String(ga.label).localeCompare(String(gb.label));
+      });
+      return order.map(k => groups[k]);
+    }
+
+    function renderModelRow(m) {
+      const isThinking = m.capabilities && m.capabilities.isThinking;
+      const isVision = m.capabilities && m.capabilities.supportsImages;
+      const caps = [];
+      if (isThinking) caps.push('<span class="cap-tag active-thinking">🧠 深度思考</span>');
+      if (isVision) caps.push('<span class="cap-tag active-vision">🖼️ 视觉/多模态</span>');
+      if (m.allowUnauthorized) caps.push('<span class="cap-tag" style="border-color: rgba(245, 158, 11, 0.4); color: #fcd34d;">🔓 SSL Bypass</span>');
+      if (m.encrypted) caps.push('<span class="cap-tag">🔒 safeStorage 已加密</span>');
+
+      return \`
+        <div class="model-row">
+          <div class="model-row-main">
+            <div class="model-row-display">\${escapeHtml(m.displayName)}</div>
+            <div class="model-row-meta">\${escapeHtml(m.name)} · 外部: \${escapeHtml(m.externalModelName || '(同内部名称)')}</div>
+          </div>
+          \${caps.length ? '<div class="model-row-caps">' + caps.join('') + '</div>' : ''}
+          <div class="model-row-actions">
+            <button id="btn-test-\${m.slug}" class="btn btn-secondary btn-sm" onclick="testModel('\${escapeHtml(m.name)}', '\${m.slug}')">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+              测试
+            </button>
+            <button id="btn-edit-\${m.slug}" class="btn btn-secondary btn-sm" onclick="openEditModal('\${escapeHtml(m.name)}')">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+              编辑
+            </button>
+            <button id="btn-del-\${m.slug}" class="btn btn-danger btn-sm" onclick="deleteModel('\${escapeHtml(m.name)}')">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+            </button>
+          </div>
+          <div id="test-res-\${m.slug}" class="test-result-box"></div>
+        </div>
+      \`;
+    }
+
     // ─── Render Models ───────────────────────────────────────
     function renderModels() {
       const container = document.getElementById('models-container');
@@ -1383,54 +1599,21 @@ export function renderDashboardHtml(): string {
         return;
       }
 
-      container.innerHTML = filtered.map((m, idx) => {
-        const provClass = ['openai', 'anthropic', 'deepseek', 'ollama', 'google'].includes(m.provider) ? m.provider : 'custom';
-        const isThinking = m.capabilities && m.capabilities.isThinking;
-        const isVision = m.capabilities && m.capabilities.supportsImages;
-
+      const groups = groupModels(filtered);
+      container.innerHTML = groups.map(g => {
+        const prov = providerClass(g.provider);
+        const gid = String(g.key).replace(/[^a-zA-Z0-9_-]/g, '-');
         return \`
-          <div class="model-card" id="card-\${m.slug}">
-            <div>
-              <div class="model-card-header">
-                <div class="model-name-group">
-                  <div class="model-display-name">\${escapeHtml(m.displayName)}</div>
-                  <div class="model-internal-name">\${escapeHtml(m.name)}</div>
-                </div>
-                <span class="provider-badge \${provClass}">\${escapeHtml(m.provider)}</span>
+          <div class="platform-group" id="platform-\${gid}">
+            <div class="platform-header">
+              <div class="platform-name-group">
+                <div class="platform-name">\${escapeHtml(g.label)}</div>
+                <span class="provider-badge \${prov}">\${escapeHtml(g.provider)}</span>
               </div>
-
-              <div class="model-meta-list" style="margin-top: 12px;">
-                <div class="meta-row">
-                  <span class="meta-label">外部模型:</span>
-                  <span class="meta-val">\${escapeHtml(m.externalModelName || '(同内部名称)')}</span>
-                </div>
-              </div>
-
-              <div class="caps-group" style="margin-top: 10px;">
-                \${isThinking ? '<span class="cap-tag active-thinking">🧠 深度思考</span>' : ''}
-                \${isVision ? '<span class="cap-tag active-vision">🖼️ 视觉/多模态</span>' : ''}
-                \${m.allowUnauthorized ? '<span class="cap-tag" style="border-color: rgba(245, 158, 11, 0.4); color: #fcd34d;">🔓 SSL Bypass</span>' : ''}
-                \${m.encrypted ? '<span class="cap-tag">🔒 safeStorage 已加密</span>' : ''}
-              </div>
+              <div class="platform-count">\${g.models.length} 个模型</div>
             </div>
-
-            <!-- Inline Test Result Box -->
-            <div id="test-res-\${m.slug}" class="test-result-box"></div>
-
-            <div class="model-card-actions">
-              <button id="btn-test-\${m.slug}" class="btn btn-secondary btn-sm" onclick="testModel('\${escapeHtml(m.name)}', '\${m.slug}')">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
-                测试连通性
-              </button>
-              <div style="display: flex; gap: 6px;">
-                <button id="btn-edit-\${m.slug}" class="btn btn-secondary btn-sm" onclick="openEditModal('\${escapeHtml(m.name)}')">
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
-                  编辑
-                </button>
-                <button id="btn-del-\${m.slug}" class="btn btn-danger btn-sm" onclick="deleteModel('\${escapeHtml(m.name)}')">
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
-                </button>
-              </div>
+            <div class="model-rows">
+              \${g.models.map(m => renderModelRow(m)).join('')}
             </div>
           </div>
         \`;

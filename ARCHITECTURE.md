@@ -550,6 +550,12 @@ OpenAI 兼容自定义模型（`openai` / `custom` / `openrouter` / `ollama` 等
   1. 在 `src/proxy/translators/openai.ts` 中实现通用文本工具调用解析引擎（`parseDSMLToolCalls` / `parseTextToolCalls`），覆盖 DSML、XML 命名标签、Hermes/Qwen JSON 对象、GLM 拼接参数以及 Antigravity 原生 `<call:default_api:...>` 格式；
   2. 实现流式实时 Holdback 拦截列表（`TOOL_CALL_START_MARKERS`），在流式传输阶段遇到任何未闭合的工具调用标签时先 hold 住原始标记（仅发射标签前的导引正文），彻底防止 `<tool_call>` 等标签在界面闪烁泄漏；
   3. 流式结束或标签闭合后，自动将解析出的工具名与参数归一化为标准的 Gemini `functionCall` 并返回 `finishReason: "STOP"`，驱动 IDE 自动调用相应工具。
+* **演进变体补充（2026-09-02）**：模型还会输出两种此前未覆盖的形态，均可能在流式阶段泄漏为可见文本或导致工具不执行：
+  * **非对称闭合标签**：`<tool_call:list_dir>{...}</list_dir>`（闭合标签只写函数名、丢掉 `tool_call:` 前缀）。`tagNamedRegex` 要求闭合标签还原前缀，故不匹配。新增 `asymTagNamedRegex` 允许闭合标签仅回写函数名，单独作为 Pass 3b 处理。
+  * **XML 内嵌参数**：裸标签 `<view_file>\n<AbsolutePath>d:\x\README.md</AbsolutePath>\n<IsSkillFile>true</IsSkillFile>\n</view_file>`。`parseArgsFromBlock` 只认 `<parameter>`、JSON、拼接键值对与 `Key>value` 瘦文本，不认 `<Param>value</Param>`。新增 `extractXmlInnerArgs` 提取这类参数。
+  * **参数校验过严**：`validateBareArgs` 原先要求所有键都命中声明 schema。真实模型常附带 `IsSkillFile` / `toolSummary` / `toolAction` 等元数据键导致误拒。放宽为「至少有一个键命中声明 schema」才拒绝，避免误丢合法调用。
+  * **反斜杠路径被 JSON 转义**：模型未转义的 Windows 路径（如 `...\src\translators`）里的 `\t`/`\n` 会被 `JSON.parse` 误转义。`extractJsonObject` 的恢复分支未命中时，把所有 `\x` 当路径分隔符处理，避免参数被破坏。
+* **流式发射回归修复（2026-09-02 晚）**：前期为加固标签 Holdback 引入了 `emittedLen` / 多标记边界（bare-tag 标记 + `startMarkers`）的流式发射逻辑，反而导致 sensenova / GLM 在模型流式输出工具调用（如 `run_command`）后被 IDE 提前结束（工具未执行、随即切回内置模型）。已把 `mapOpenAIChunkToGemini` 的**流式发射逻辑还原为 HEAD~1（6f342da）的版本**（仅持有 `TOOL_CALL_START_MARKERS`，不再累计 `emittedLen`、不再把 bare-tag 纳入流式 Holdback），并**保留解析层的全部修复**：非对称闭合标签、`extractXmlInnerArgs`、`validateBareArgs` `some()` 放宽、反斜杠路径。这样既恢复此前可用的工具调用交付（模型发出的 `run_command` → 正确归一化 → 发射 `functionCall` + `STOP`），又保留了对 leak 的解析能力。真实请求验证：`run_command "ls -la"` → `list_dir`，正常发射 `functionCall`。
 
 ---
 

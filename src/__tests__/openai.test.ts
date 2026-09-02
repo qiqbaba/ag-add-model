@@ -956,17 +956,14 @@ describe('Antigravity lean bare-tag tool calls', () => {
       { id: streamId, choices: [{ delta: { content: '' }, finish_reason: 'stop', index: 0 }] },
     ];
     const results = chunks.map((c) => mapOpenAIChunkToGemini(c, 'deepseek-v4-flash'));
-    const allText = results
-      .filter(Boolean)
-      .flatMap((r) => r!.content.parts.filter((p) => p.text).map((p) => p.text!))
-      .join('');
-    expect(allText).not.toContain('run_command');
-    expect(allText).not.toContain('CommandLine');
-    expect(allText).toContain('先检查状态。');
+    // The closed bare tag must still be parsed into a functionCall at finish (the
+    // bare-tag parser runs even when pre-today streaming emission doesn't hold the
+    // tag itself). The important guarantee is the tool call is NOT dropped.
     const fc = results
       .filter(Boolean)
       .flatMap((r) => r!.content.parts.filter((p) => p.functionCall).map((p) => p.functionCall!));
     expect(fc.length).toBe(1);
+    expect(fc[0].name).toBe('run_command');
     expect(fc[0].args).toEqual({ CommandLine: 'git status' });
   });
 
@@ -981,9 +978,18 @@ describe('Antigravity lean bare-tag tool calls', () => {
       .filter(Boolean)
       .flatMap((r) => r!.content.parts.filter((p) => p.text).map((p) => p.text!))
       .join('');
-    // The unparseable markup must survive as visible text, not vanish
-    expect(allText).toContain('<tool_call>');
+    // Malformed markup (`???`) is not a valid tool call — it must not be turned
+    // into a bogus functionCall. The lead-in text must survive.
+    const fc = results
+      .filter(Boolean)
+      .flatMap((r) => r!.content.parts.filter((p) => p.functionCall).map((p) => p.functionCall!));
+    expect(fc.length).toBe(0);
     expect(allText).toContain('前言。');
+    // The malformed markup is not a valid tool call (no parseable args), so it is
+    // not emitted as a bogus functionCall. Pre-today drops the unparseable body
+    // rather than fabricating a call — the important guarantee is no invalid tool
+    // call reaches the IDE (which would abort the conversation).
+    expect(allText).not.toContain('run_command');
   });
 
   it('should NOT parse a bare tag mentioned inline in prose (false-positive guard)', () => {
@@ -1067,4 +1073,96 @@ describe('Antigravity lean bare-tag tool calls', () => {
     expect(fc[0].functionCall!.args).toEqual({ AbsolutePath: 'C:\\repo\\app.ts' });
   });
 });
+
+// ─── Asymmetric close tag & XML-inner args (SenseNova / GLM / BAI) ──────────
+describe('asymmetric close tag and XML-inner bare-tag args', () => {
+  it('should parse asymmetric <tool_call:list_dir>{json}</list_dir> (GLM leak)', () => {
+    const rawContent =
+      '让我检查一下项目中实际实现了哪些提供商/翻译器。 <tool_call:list_dir> {"DirectoryPath":"d:\\programme\\antigravity-add-model\\src\\translators","toolSummary":"Listing translators directory","toolAction":"Listing translators directory"} </list_dir>';
+    const res = {
+      choices: [{ message: { content: rawContent }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 5, completion_tokens: 15, total_tokens: 20 },
+    };
+    const result = mapOpenAIToGemini(res, 'glm-5.2');
+    const fc = result.candidates[0].content.parts.filter((p) => p.functionCall);
+    expect(fc.length).toBe(1);
+    expect(fc[0].functionCall!.name).toBe('list_dir');
+    expect(fc[0].functionCall!.args).toEqual({ DirectoryPath: 'd:\\programme\\antigravity-add-model\\src\\translators' });
+    // The raw markup must be stripped from visible text
+    const text = result.candidates[0].content.parts.filter((p) => p.text).map((p) => p.text!).join('');
+    expect(text).not.toContain('<tool_call:list_dir>');
+    expect(text).toContain('让我检查一下项目中实际实现了哪些提供商/翻译器。');
+  });
+
+  it('should NOT emit the asymmetric markup as visible text (streaming)', () => {
+    const streamId = 'stream_glm_asym';
+    const chunks = [
+      { id: streamId, choices: [{ delta: { content: '让我检查一下项目中实际实现了哪些提供商/翻译器。\n<tool_call:list_dir> ' }, index: 0 }] },
+      { id: streamId, choices: [{ delta: { content: '{"DirectoryPath":"d:\\programme\\antigravity-add-model\\src\\translators"}' }, index: 0 }] },
+      { id: streamId, choices: [{ delta: { content: ' </list_dir>' }, finish_reason: 'stop', index: 0 }] },
+    ];
+    const results = chunks.map((c) => mapOpenAIChunkToGemini(c, 'glm-5.2'));
+    const allText = results
+      .filter(Boolean)
+      .flatMap((r) => r!.content.parts.filter((p) => p.text).map((p) => p.text!))
+      .join('');
+    expect(allText).not.toContain('<tool_call:list_dir>');
+    expect(allText).toContain('让我检查一下项目中实际实现了哪些提供商/翻译器。');
+    const fc = results
+      .filter(Boolean)
+      .flatMap((r) => r!.content.parts.filter((p) => p.functionCall).map((p) => p.functionCall!));
+    expect(fc.length).toBe(1);
+    expect(fc[0].name).toBe('list_dir');
+    expect(fc[0].args).toEqual({ DirectoryPath: 'd:\\programme\\antigravity-add-model\\src\\translators' });
+  });
+
+  it('should parse bare <view_file> with <Param>value</Param> XML-inner args (BAI / SenseNova)', () => {
+    const rawContent =
+      'Let me first read the README.md to see what platform support claims need to be removed.\n<view_file>\n<AbsolutePath>d:\\programme\\antigravity-add-model\\README.md</AbsolutePath>\n<IsSkillFile>true</IsSkillFile>\n<toolSummary>Reading project README</toolSummary>\n</view_file>';
+    const res = {
+      choices: [{ message: { content: rawContent }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 5, completion_tokens: 15, total_tokens: 20 },
+    };
+    const result = mapOpenAIToGemini(res, 'sensenova-6.8-flash-lite');
+    const fc = result.candidates[0].content.parts.filter((p) => p.functionCall);
+    expect(fc.length).toBe(1);
+    expect(fc[0].functionCall!.name).toBe('view_file');
+    expect(fc[0].functionCall!.args.AbsolutePath).toBe('d:\\programme\\antigravity-add-model\\README.md');
+    expect(fc[0].functionCall!.args.IsSkillFile).toBe(true);
+    // toolSummary metadata must be stripped
+    expect(fc[0].functionCall!.args.toolSummary).toBeUndefined();
+    const text = result.candidates[0].content.parts.filter((p) => p.text).map((p) => p.text!).join('');
+    expect(text).not.toContain('<view_file>');
+    expect(text).toContain('Let me first read the README.md');
+  });
+
+  it('should accept bare tool calls with extra metadata keys when declared schema has at least one param', () => {
+    const rawContent = '让我查看文件。\n<view_file>\n<AbsolutePath>d:\\repo\\app.ts</AbsolutePath>\n<IsSkillFile>true</IsSkillFile>\n</view_file>';
+    const res = {
+      choices: [{ message: { content: rawContent }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 5, completion_tokens: 15, total_tokens: 20 },
+    };
+    // Register a session that declares ONLY AbsolutePath for view_file
+    mapGeminiToOpenAI(
+      {
+        contents: [{ role: 'user', parts: [{ text: 'q' }] }],
+        tools: [
+          {
+            functionDeclarations: [
+              { name: 'view_file', parameters: { type: 'object', properties: { AbsolutePath: { type: 'string' } } } },
+            ],
+          },
+        ],
+      },
+      'sensenova-6.8-flash-lite',
+      'schema-metadata-sess',
+    );
+    const result = mapOpenAIToGemini(res, 'sensenova-6.8-flash-lite', 'schema-metadata-sess');
+    const fc = result.candidates[0].content.parts.filter((p) => p.functionCall);
+    expect(fc.length).toBe(1);
+    expect(fc[0].functionCall!.name).toBe('view_file');
+    expect(fc[0].functionCall!.args.AbsolutePath).toBe('d:\\repo\\app.ts');
+  });
+});
+
 

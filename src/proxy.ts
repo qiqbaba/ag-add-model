@@ -9,6 +9,7 @@ import * as https from 'https';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as zlib from 'zlib';
+import * as os from 'os';
 import { fileURLToPath } from 'url';
 import { StringDecoder } from 'string_decoder';
 import log from 'electron-log';
@@ -117,6 +118,21 @@ export {
 
 import * as cryptoStore from './cryptoStore';
 import { validateCustomModel } from './schemaValidator';
+
+// ─── Raw stream diagnostics ────────────────────────────────────────────────
+// Enables raw upstream chunk logging (rawStreamEnabled) so a failing tool-call
+// stream can be captured without restarting the proxy. To enable, create the
+// flag file (or set the env var). Checked lazily per chunk so it can be toggled
+// mid-session. The flag file lives next to the dashboard/port state files.
+const RAW_FLAG_FILE = path.join(os.homedir(), '.gemini', 'antigravity', 'raw_stream.flag');
+function rawStreamEnabled(): boolean {
+  if (process.env.DSH_RAW_STREAM) return true;
+  try {
+    return fs.existsSync(RAW_FLAG_FILE);
+  } catch {
+    return false;
+  }
+}
 
 // ─── Model Helpers ────────────────────────────────────────────────────────
 
@@ -645,12 +661,18 @@ function handleCustomModelRequest(
             if (dataStr === '[DONE]') continue;
             try {
               const parsed = JSON.parse(dataStr);
+              if (rawStreamEnabled()) {
+                log.info(`[Proxy][RAW:${model.name}] ${dataStr}`);
+              }
               const mapped = registry.translateStreamChunk(provider, parsed, model.name, sessionId, streamInstanceId);
 
               if (mapped) {
                 const mappedObj = mapped as { finishReason?: string };
                 if (mappedObj.finishReason && mappedObj.finishReason !== 'OTHER') {
                   lastFinishReason = mappedObj.finishReason;
+                }
+                if (rawStreamEnabled()) {
+                  log.info(`[Proxy][MAP:${model.name}] ${JSON.stringify(mapped)}`);
                 }
                 const cloudCodeResponse = {
                   response: { candidates: [mapped] },

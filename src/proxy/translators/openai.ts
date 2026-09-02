@@ -607,7 +607,11 @@ function extractJsonObject(body: string): Record<string, unknown> | null {
       : null;
   } catch (_e) {
     try {
-      const sanitized = slice.replace(/\\([^"\\/bfnrtu])/g, '\\\\$1');
+      // Recovery branch: the raw slice failed JSON.parse, so unescaped Windows
+      // paths (e.g. "\src\translators") are present. Because a real JSON escape
+      // (`\t` -> tab, `\n` -> newline) would have PARSED fine, any backslash here
+      // is a Windows path separator. Escape every remaining `\x` literally.
+      const sanitized = slice.replace(/\\([^"\\])/g, '\\\\$1');
       const value = JSON.parse(sanitized);
       return value && typeof value === 'object' && !Array.isArray(value)
         ? (value as Record<string, unknown>)
@@ -742,7 +746,37 @@ function parseArgsFromBlock(block: string): Record<string, unknown> | null {
   const leanArgs = extractLeanKeyValues(block);
   if (leanArgs) return leanArgs;
 
+  // 5. Check for XML-inner `<Param>value</Param>` tags used by SenseNova / GLM /
+  // BAI bare tool calls, e.g. "<view_file>\n<AbsolutePath>d:\\x\\README.md</AbsolutePath>\n</view_file>".
+  const xmlInnerArgs = extractXmlInnerArgs(block);
+  if (xmlInnerArgs) return xmlInnerArgs;
+
   return null;
+}
+
+/**
+ * Extracts `<Param>value</Param>` key-value pairs inside a tool-call body.
+ * SenseNova / GLM / BAI models render bare-tag args as XML tags rather than JSON
+ * (e.g. `<AbsolutePath>d:\x\README.md</AbsolutePath>`). Values up to the matching
+ * closing tag are coerced to boolean/number when they look like primitives so the
+ * resulting args match the IDE's declared schema.
+ */
+function extractXmlInnerArgs(block: string): Record<string, unknown> | null {
+  const tagRegex = /<([A-Za-z_][A-Za-z0-9_]*)>([\s\S]*?)<\/\1>/g;
+  const args: Record<string, unknown> = {};
+  let m: RegExpExecArray | null;
+  let found = false;
+  while ((m = tagRegex.exec(block)) !== null) {
+    if (!m[0]) continue;
+    const rawVal = m[2].trim();
+    let val: unknown = rawVal;
+    if (rawVal === 'true') val = true;
+    else if (rawVal === 'false') val = false;
+    else if (/^-?\d+(?:\.\d+)?$/.test(rawVal)) val = Number(rawVal);
+    args[m[1]] = val;
+    found = true;
+  }
+  return found ? args : null;
 }
 
 /**
@@ -799,7 +833,12 @@ function parseDSMLToolCalls(
       if (!declared) return false; // tool name not declared → not executable
       const keys = Object.keys(args);
       if (keys.length === 0) return false;
-      return keys.every((k) => declared.includes(k));
+      // Accept when AT LEAST ONE declared param is present. Real models often
+      // attach extra metadata (IsSkillFile / toolAction / StartLine / EndLine)
+      // beyond the declared schema; rejecting on those would drop valid calls.
+      // Only reject when NONE of the extracted keys are declared params (prose
+      // quoting a tag with unrelated param names).
+      return keys.some((k) => declared.includes(k));
     };
 
     const pushCall = (
@@ -838,6 +877,16 @@ function parseDSMLToolCalls(
     const tagNamedRegex =
       /<(?:DSML\||tool_call:|function_call:)((?!tool_calls|tool_call|invoke|parameter)[A-Za-z_][\w]*)>([\s\S]*?)<\/(?:DSML\||tool_call:|function_call:)\1>/g;
     while ((match = tagNamedRegex.exec(text)) !== null) {
+      if (match[0]) pushCall(match[1], match[2], match[0]);
+    }
+
+    // Pass 3b: Asymmetric close — the closing tag repeats only the function name,
+    // NOT the full prefix: <tool_call:list_dir>{...}</list_dir> (GLM / SenseNova).
+    // The symmetric requirement in Pass 3 above misses this, causing the whole
+    // block to leak as visible text (see image 2).
+    const asymTagNamedRegex =
+      /<(?:DSML\||tool_call:|function_call:)((?!tool_calls|tool_call|invoke|parameter)[A-Za-z_][\w]*)>([\s\S]*?)<\/\1>/g;
+    while ((match = asymTagNamedRegex.exec(text)) !== null) {
       if (match[0]) pushCall(match[1], match[2], match[0]);
     }
 
@@ -1126,58 +1175,45 @@ export function mapOpenAIChunkToGemini(
   // that precedes the first tool-call marker is still emitted immediately.
   const leanToolNames = getLeanToolNames(stateKeyStr);
   const leanParamSchemas = modelToolSchemas.get(stateKeyStr) ?? null;
-  const startMarkers = TOOL_CALL_START_MARKERS.concat(leanToolNames.map((n) => `<${n}>`));
+  const prevAcc = context.accumulatedText.slice(0, context.accumulatedText.length - text.length);
+  const alreadyInsideToolBlock = hasUnclosedToolCallBlock(prevAcc);
   const emitParts: GeminiPart[] = [];
   if (reasoning) emitParts.push({ text: reasoning, thought: true });
   if (text) {
-    // Operate on the un-emitted tail of accumulatedText so held-back markup is
-    // never dropped and each byte is emitted at most once. `emittedLen` records
-    // how many leading chars of accumulatedText have already been sent.
-    const unemitted = context.accumulatedText.slice(context.emittedLen || 0);
-    // "Already inside" reflects the text BEFORE this delta: if the tool block
-    // opened in a prior chunk, hold the whole delta; if it opens within THIS
-    // delta, the lead-in before the marker is still emitted below.
-    const prevAcc = context.accumulatedText.slice(0, context.accumulatedText.length - text.length);
-    const alreadyInsideToolBlock =
-      hasUnclosedToolCallBlock(prevAcc) || hasUnclosedBareToolBlock(prevAcc, leanToolNames);
     if (alreadyInsideToolBlock) {
-      // The new delta extends an in-flight tool block: hold it entirely.
+      // Entire delta is inside an in-flight tool block: hold it entirely.
     } else {
-      // Find the earliest tool-call marker in the un-emitted text. Bare tags
-      // only count when they sit at a block boundary (start of line / first
-      // non-whitespace) and outside a code fence — an inline `<view_file>` in
-      // prose is just text, not a tool call.
-      let boundaryHoldLen = 0;
       let earliestIdx = -1;
-      for (const marker of startMarkers) {
-        const idx = unemitted.indexOf(marker);
-        if (idx === -1) continue;
-        const isBare = marker.startsWith('<') && !TOOL_CALL_START_MARKERS.includes(marker);
-        if (isBare && !isBlockBoundaryAndNotFenced(unemitted, idx)) continue;
-        if (earliestIdx === -1 || idx < earliestIdx) earliestIdx = idx;
+      for (const marker of TOOL_CALL_START_MARKERS) {
+        const idx = text.indexOf(marker);
+        if (idx >= 0 && (earliestIdx === -1 || idx < earliestIdx)) {
+          earliestIdx = idx;
+        }
       }
+      let safePrefix = earliestIdx >= 0 ? text.slice(0, earliestIdx) : text;
       if (earliestIdx === -1) {
-        // No confirmed marker: hold back only the trailing partial-marker
-        // suffix that could be the start of a marker split across this chunk.
-        for (const marker of startMarkers) {
-          const maxCheck = Math.min(marker.length - 1, unemitted.length);
-          for (let len = maxCheck; len > boundaryHoldLen; len--) {
-            if (unemitted.endsWith(marker.slice(0, len))) {
-              boundaryHoldLen = len;
+        // A tool-call marker may be split across chunk boundaries (e.g. chunk
+        // ends with "<tool_" and the next chunk starts with "call>"). Hold back
+        // the trailing partial-marker suffix so it never leaks as visible text;
+        // it stays in accumulatedText and is re-evaluated with the next delta.
+        let holdLen = 0;
+        for (const marker of TOOL_CALL_START_MARKERS) {
+          const maxCheck = Math.min(marker.length - 1, text.length);
+          for (let len = maxCheck; len > holdLen; len--) {
+            if (text.endsWith(marker.slice(0, len))) {
+              holdLen = len;
               break;
             }
           }
         }
+        if (holdLen > 0) {
+          safePrefix = safePrefix.slice(0, safePrefix.length - holdLen);
+          context.pendingHeldSuffix = text.slice(text.length - holdLen);
+        } else {
+          delete context.pendingHeldSuffix;
+        }
       }
-      const safeLen =
-        earliestIdx >= 0 ? earliestIdx : unemitted.length - boundaryHoldLen;
-      const safePrefix = unemitted.slice(0, safeLen);
-      if (safePrefix) {
-        emitParts.push({ text: safePrefix });
-        context.emittedLen = (context.emittedLen || 0) + safePrefix.length;
-      }
-      context.pendingHeldSuffix = earliestIdx >= 0 ? unemitted.slice(earliestIdx) : undefined;
-      if (earliestIdx === -1 && boundaryHoldLen === 0) delete context.pendingHeldSuffix;
+      if (safePrefix) emitParts.push({ text: safePrefix });
     }
   }
 
@@ -1215,7 +1251,6 @@ export function mapOpenAIChunkToGemini(
       parts.push({ functionCall: { name: tr.name, args: tr.args as Record<string, unknown>, id: callId } });
     });
     context.accumulatedText = '';
-    context.emittedLen = 0;
     context.hasEmittedToolCall = true;
     return { content: { parts, role: 'model' }, finishReason: 'STOP', index: 0 };
   }
@@ -1288,14 +1323,12 @@ export function mapOpenAIChunkToGemini(
         return { content: { parts, role: 'model' }, finishReason: 'STOP', index: 0 };
       }
     }
-    // Flush any held-back text that turned out not to be a parseable tool call
-    // (partial markers, in-flight tool blocks that failed final parsing). It was
-    // withheld only to prevent markup leakage — never drop it silently, or the
-    // reply appears to end early (emission is strictly prefix-based, so the
-    // un-emitted portion is always the tail of accumulatedText).
-    const unemittedTail = context.accumulatedText.slice(context.emittedLen || 0);
-    if (unemittedTail) emitParts.push({ text: unemittedTail });
-    delete context.pendingHeldSuffix;
+    // Flush any held-back partial marker that turned out to be plain text
+    // (it was withheld only to prevent markup leakage, not to be dropped).
+    if (context.pendingHeldSuffix) {
+      emitParts.push({ text: context.pendingHeldSuffix });
+      delete context.pendingHeldSuffix;
+    }
     activeStreamContexts.delete(streamId);
     return {
       content: { parts: emitParts, role: 'model' },
