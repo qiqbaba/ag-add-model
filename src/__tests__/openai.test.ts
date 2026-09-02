@@ -879,3 +879,192 @@ describe('mapOpenAIToGemini GLM & Multi-Model Text Tool Calls', () => {
   });
 });
 
+// ─── Antigravity Lean Bare-Tag Tool Calls (BAI / GLM-5.2 regression) ────────
+
+describe('Antigravity lean bare-tag tool calls', () => {
+  it('should parse bare <run_command>{...}</run_command> with JSON body (BAI leak)', () => {
+    const rawContent =
+      '让我先查看状态。\n<run_command> {"CommandLine":"git status","Cwd":"d:\\\\project"} </run_command>';
+    const res = {
+      choices: [{ message: { content: rawContent }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 5, completion_tokens: 15, total_tokens: 20 },
+    };
+    const result = mapOpenAIToGemini(res, 'deepseek-v4-flash');
+    const fc = result.candidates[0].content.parts.filter((p) => p.functionCall);
+    expect(fc.length).toBe(1);
+    expect(fc[0].functionCall!.name).toBe('run_command');
+    expect(fc[0].functionCall!.args).toEqual({ CommandLine: 'git status', Cwd: 'd:\\project' });
+    const text = result.candidates[0].content.parts
+      .filter((p) => p.text)
+      .map((p) => p.text!)
+      .join('');
+    expect(text).not.toContain('run_command>');
+  });
+
+  it('should parse bare <view_file> with Param>value lean args (BAI leak)', () => {
+    const rawContent =
+      '<view_file>\nAbsolutePath>C:\\Users\\test\\SKILL.md\nIsSkillFile>true toolSummary>Reading skill file\n</view_file>';
+    const res = {
+      choices: [{ message: { content: rawContent }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 5, completion_tokens: 15, total_tokens: 20 },
+    };
+    const result = mapOpenAIToGemini(res, 'deepseek-v4-flash');
+    const fc = result.candidates[0].content.parts.filter((p) => p.functionCall);
+    expect(fc.length).toBe(1);
+    expect(fc[0].functionCall!.name).toBe('view_file');
+    expect(fc[0].functionCall!.args).toEqual({ AbsolutePath: 'C:\\Users\\test\\SKILL.md', IsSkillFile: true });
+  });
+
+  it('should parse <tool_call> with lean args (GLM early-end) instead of dropping it', () => {
+    const streamId = 'stream_glm_lean';
+    const chunk1 = {
+      id: streamId,
+      choices: [
+        {
+          delta: {
+            content: '我来执行 gc 指令，首先检查工作区的 Git 变动状态。\n<tool_call>run_command\nCommandLine>git status -s',
+          },
+          index: 0,
+        },
+      ],
+    };
+    const chunk2 = {
+      id: streamId,
+      choices: [{ delta: { content: '\nCwd>d:\\project\n</tool_call>' }, finish_reason: 'stop', index: 0 }],
+    };
+
+    const r1 = mapOpenAIChunkToGemini(chunk1, 'glm-5.2');
+    const text1 = (r1?.content.parts.filter((p) => p.text).map((p) => p.text!) || []).join('');
+    expect(text1.trim()).toBe('我来执行 gc 指令，首先检查工作区的 Git 变动状态。');
+    expect(text1).not.toContain('<tool_call>');
+
+    const r2 = mapOpenAIChunkToGemini(chunk2, 'glm-5.2');
+    expect(r2).not.toBeNull();
+    expect(r2!.finishReason).toBe('STOP');
+    const fc = r2!.content.parts.filter((p) => p.functionCall);
+    expect(fc.length).toBe(1);
+    expect(fc[0].functionCall!.name).toBe('run_command');
+    expect(fc[0].functionCall!.args).toEqual({ CommandLine: 'git status -s', Cwd: 'd:\\project' });
+  });
+
+  it('should hold bare <run_command> markup during streaming and emit functionCall', () => {
+    const streamId = 'stream_bai_bare';
+    const chunks = [
+      { id: streamId, choices: [{ delta: { content: '先检查状态。\n<run_comm' }, index: 0 }] },
+      { id: streamId, choices: [{ delta: { content: 'and> {"CommandLine":"git ' }, index: 0 }] },
+      { id: streamId, choices: [{ delta: { content: 'status"} </run_command>' }, index: 0 }] },
+      { id: streamId, choices: [{ delta: { content: '' }, finish_reason: 'stop', index: 0 }] },
+    ];
+    const results = chunks.map((c) => mapOpenAIChunkToGemini(c, 'deepseek-v4-flash'));
+    const allText = results
+      .filter(Boolean)
+      .flatMap((r) => r!.content.parts.filter((p) => p.text).map((p) => p.text!))
+      .join('');
+    expect(allText).not.toContain('run_command');
+    expect(allText).not.toContain('CommandLine');
+    expect(allText).toContain('先检查状态。');
+    const fc = results
+      .filter(Boolean)
+      .flatMap((r) => r!.content.parts.filter((p) => p.functionCall).map((p) => p.functionCall!));
+    expect(fc.length).toBe(1);
+    expect(fc[0].args).toEqual({ CommandLine: 'git status' });
+  });
+
+  it('should flush held markup as text instead of silently dropping it when parsing fails', () => {
+    const streamId = 'stream_unparseable';
+    const chunks = [
+      { id: streamId, choices: [{ delta: { content: '前言。\n<tool_call>run_command\n???' }, index: 0 }] },
+      { id: streamId, choices: [{ delta: { content: '' }, finish_reason: 'stop', index: 0 }] },
+    ];
+    const results = chunks.map((c) => mapOpenAIChunkToGemini(c, 'glm-5.2'));
+    const allText = results
+      .filter(Boolean)
+      .flatMap((r) => r!.content.parts.filter((p) => p.text).map((p) => p.text!))
+      .join('');
+    // The unparseable markup must survive as visible text, not vanish
+    expect(allText).toContain('<tool_call>');
+    expect(allText).toContain('前言。');
+  });
+
+  it('should NOT parse a bare tag mentioned inline in prose (false-positive guard)', () => {
+    const rawContent = '你可以使用 <view_file> 工具来读取文件内容，或用 <run_command> 执行命令。';
+    const res = {
+      choices: [{ message: { content: rawContent }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 5, completion_tokens: 15, total_tokens: 20 },
+    };
+    const result = mapOpenAIToGemini(res, 'deepseek-v4-flash');
+    const fc = result.candidates[0].content.parts.filter((p) => p.functionCall);
+    expect(fc.length).toBe(0);
+    const text = result.candidates[0].content.parts.filter((p) => p.text).map((p) => p.text!).join('');
+    expect(text).toContain('view_file');
+  });
+
+  it('should NOT parse a bare tag inside a code fence (quoted example)', () => {
+    const rawContent = '示例：\n```\n<run_command>\nCommandLine>git status\n</run_command>\n```\n如上所示。';
+    const res = {
+      choices: [{ message: { content: rawContent }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 5, completion_tokens: 15, total_tokens: 20 },
+    };
+    const result = mapOpenAIToGemini(res, 'deepseek-v4-flash');
+    const fc = result.candidates[0].content.parts.filter((p) => p.functionCall);
+    expect(fc.length).toBe(0);
+  });
+
+  it('should NOT parse a bare tag whose args do not match the declared schema', () => {
+    // Prose quoting a tag with param names the IDE never declared → would abort
+    // the turn with "invalid tool call" if emitted.
+    const rawContent = '读取技能：\n<view_file>\nIsSkillFile>true toolSummary>Reading skill file\n</view_file>';
+    const res = {
+      choices: [{ message: { content: rawContent }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 5, completion_tokens: 15, total_tokens: 20 },
+    };
+    // mapGeminiToOpenAI registers the session schema (AbsolutePath only)…
+    mapGeminiToOpenAI(
+      {
+        systemInstruction: { parts: [{ text: 'sys' }] },
+        contents: [{ role: 'user', parts: [{ text: 'q' }] }],
+        tools: [
+          {
+            functionDeclarations: [
+              { name: 'view_file', parameters: { type: 'object', properties: { AbsolutePath: { type: 'string' } } } },
+              { name: 'run_command', parameters: { type: 'object', properties: { CommandLine: { type: 'string' } } } },
+            ],
+          },
+        ],
+      },
+      'deepseek-v4-flash',
+      'schema-session-1',
+    );
+    const result = mapOpenAIToGemini(res, 'deepseek-v4-flash', 'schema-session-1');
+    const fc = result.candidates[0].content.parts.filter((p) => p.functionCall);
+    expect(fc.length).toBe(0);
+  });
+
+  it('should still parse a REAL bare lean call whose args match the declared schema', () => {
+    const rawContent = '让我查看文件。\n<view_file>\nAbsolutePath>C:\\repo\\app.ts\n</view_file>';
+    const res = {
+      choices: [{ message: { content: rawContent }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 5, completion_tokens: 15, total_tokens: 20 },
+    };
+    mapGeminiToOpenAI(
+      {
+        contents: [{ role: 'user', parts: [{ text: 'q' }] }],
+        tools: [
+          {
+            functionDeclarations: [
+              { name: 'view_file', parameters: { type: 'object', properties: { AbsolutePath: { type: 'string' } } } },
+            ],
+          },
+        ],
+      },
+      'deepseek-v4-flash',
+      'schema-session-2',
+    );
+    const result = mapOpenAIToGemini(res, 'deepseek-v4-flash', 'schema-session-2');
+    const fc = result.candidates[0].content.parts.filter((p) => p.functionCall);
+    expect(fc.length).toBe(1);
+    expect(fc[0].functionCall!.name).toBe('view_file');
+    expect(fc[0].functionCall!.args).toEqual({ AbsolutePath: 'C:\\repo\\app.ts' });
+  });
+});
+

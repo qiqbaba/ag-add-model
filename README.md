@@ -188,9 +188,11 @@ npx tsc
 | `apiKey` | 提供商的 API 凭证。本地提供商（如 Ollama）留空 `""`。 |
 | `apiUrl` | 目标端点。在 Web 面板选择预设或提供商时会自动预填。 |
 | `externalModelName` | 目标提供商所期望的精确模型 ID（如 `gpt-4o`、`claude-3-5-sonnet-latest`、`llama3`）。 |
+| `supportsImages` | （可选）显式指定是否支持图片/多模态输入（`true`/`false`）。留空时按模型名称与协议自动推断。设为 `true` 时 Antigravity IDE 允许上传图片并自动进行多模态协议转换。 |
+| `supportsThinking` | （可选）显式指定是否支持深度思考/推理（`true`/`false`）。留空时按模型名称与协议自动推断。设为 `true` 时 Antigravity IDE 将展示思考预算与思考过程。 |
 | `allowUnauthorized` | （可选）设为 `true` 可跳过 SSL 证书校验。适用于内部/自签名端点。默认：`false`。 |
 | `timeout` | （可选）请求超时（毫秒）。默认：`120000`（2 分钟）。 |
-| `maxRetries` | （可选）限流/失败请求的最大重试次数。默认：`3`。 |
+| `maxRetries` | （可选）限流/失败请求的最大重试次数（支持 `0~5` 次，默认：`3`）。 |
 | `encrypted` | （可选）API Key 是否已启用 `safeStorage` 静态加密。初始手动填写明文 Key 时为 `false`（或留空），代理启动后自动加密并置为 `true`。默认：`false`。 |
 
 ---

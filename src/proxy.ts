@@ -9,6 +9,7 @@ import * as https from 'https';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as zlib from 'zlib';
+import { fileURLToPath } from 'url';
 import { StringDecoder } from 'string_decoder';
 import log from 'electron-log';
 
@@ -23,6 +24,8 @@ export interface CustomModel {
   apiUrl: string;
   externalModelName: string;
   allowUnauthorized?: boolean;
+  supportsImages?: boolean;
+  supportsThinking?: boolean;
   encrypted?: boolean;
   _slug?: string;
   _placeholderId?: string;
@@ -108,6 +111,8 @@ export {
   type ModelViewModel,
   type TestConnectionParams,
   type TestConnectionResult,
+  resolveFileData,
+  decompressResponseBody,
 };
 
 import * as cryptoStore from './cryptoStore';
@@ -284,6 +289,31 @@ function loadCustomModels(): CustomModel[] {
 
 // ─── Google Proxy ─────────────────────────────────────────────────────────
 
+function decompressResponseBody(
+  fullResBody: Buffer,
+  encoding?: string,
+): { text: string; decompressed: boolean } {
+  const enc = (encoding || '').toLowerCase().trim();
+  if (!enc || enc === 'identity') {
+    return { text: fullResBody.toString('utf-8'), decompressed: true };
+  }
+  try {
+    if (enc === 'gzip') {
+      return { text: zlib.gunzipSync(fullResBody).toString('utf-8'), decompressed: true };
+    }
+    if (enc === 'br') {
+      return { text: zlib.brotliDecompressSync(fullResBody).toString('utf-8'), decompressed: true };
+    }
+    if (enc === 'deflate') {
+      return { text: zlib.inflateSync(fullResBody).toString('utf-8'), decompressed: true };
+    }
+  } catch (e) {
+    log.error(`[Proxy] Decompression failed for encoding "${enc}":`, e);
+    return { text: '', decompressed: false };
+  }
+  return { text: '', decompressed: false };
+}
+
 function proxyToGoogle(req: http.IncomingMessage, res: http.ServerResponse, reqBody: Buffer): void {
   const isCloudCodeUrl = req.url!.includes('v1internal') || req.url!.includes('daily-cloudcode');
   const targetUrl = isCloudCodeUrl
@@ -326,19 +356,17 @@ function proxyToGoogle(req: http.IncomingMessage, res: http.ServerResponse, reqB
       proxyRes.on('data', (chunk) => responseChunks.push(chunk));
       proxyRes.on('end', () => {
         const fullResBody = Buffer.concat(responseChunks);
-        let text: string;
         const encoding = proxyRes.headers['content-encoding'];
-        if (encoding === 'gzip') {
-          try {
-            text = zlib.gunzipSync(fullResBody).toString('utf-8');
-          } catch (e) {
-            log.error('[Proxy] gunzipSync failed:', e);
-            text = fullResBody.toString('utf-8');
-          }
-        } else {
-          text = fullResBody.toString('utf-8');
+        const { text: decompressedText, decompressed } = decompressResponseBody(fullResBody, encoding);
+
+        if (!decompressed) {
+          log.warn(`[Proxy] Skipping rewrite for unsupported or failed compression (encoding: ${encoding})`);
+          res.writeHead(proxyRes.statusCode || 200, proxyRes.headers as Record<string, string>);
+          res.end(fullResBody);
+          return;
         }
 
+        let text = decompressedText;
         log.info(
           `[Proxy] Response for ${req.url} (status: ${proxyRes.statusCode}, encoding: ${encoding}, length: ${text.length})`,
         );
@@ -396,13 +424,23 @@ async function resolveFileData(
         const uri = fd.fileUri;
         let fileContent = '';
         if (uri.startsWith('file://')) {
-          const fp = uri.replace('file://', '').replace(/\//g, path.sep);
-          if (fs.existsSync(fp)) fileContent = fs.readFileSync(fp, 'utf-8');
+          let fp: string;
+          try {
+            fp = fileURLToPath(uri);
+          } catch {
+            fp = decodeURIComponent(uri.replace(/^file:\/\//, '').replace(/\//g, path.sep));
+            if (process.platform === 'win32' && fp.startsWith('\\') && /^\\[a-zA-Z]:/.test(fp)) {
+              fp = fp.slice(1);
+            }
+          }
+          if (fs.existsSync(fp)) {
+            fileContent = fs.readFileSync(fp, 'utf-8');
+          }
         } else if (authHeader && uri.startsWith('https://')) {
           fileContent = await downloadFileContent(uri, authHeader);
         }
         if (fileContent) {
-          (item.parts[i] as Record<string, unknown>) = { text: '[File content]:\n\n' + fileContent };
+          item.parts[i] = { text: '[File content]:\n\n' + fileContent };
         }
       } catch (e) {
         log.warn('[Proxy] File resolve failed:', (e as Error).message);
@@ -539,6 +577,7 @@ function handleCustomModelRequest(
     `[Proxy] Routing ${model.name} to ${model.provider} (${model.apiUrl}) (isStream: ${!!isStream})${retryCount > 0 ? ` (retry ${retryCount})` : ''}`,
   );
 
+  let destroyedByTimeout = false;
   const request = client.request(url, options, (apiRes) => {
     apiRes.on('error', (err) => {
       log.error(`[Proxy] Upstream stream error for ${model.name}:`, err.message);
@@ -759,6 +798,7 @@ function handleCustomModelRequest(
   });
 
   request.setTimeout(REQUEST_TIMEOUT_MS, () => {
+    destroyedByTimeout = true;
     log.error(`[Proxy] Request timeout (${REQUEST_TIMEOUT_MS}ms) for ${model.name}`);
     request.destroy();
 
@@ -781,6 +821,9 @@ function handleCustomModelRequest(
   });
 
   request.on('error', (err) => {
+    if (destroyedByTimeout) {
+      return;
+    }
     log.error('[Proxy] Custom Model Request Error:', err);
 
     if (retryCount < MAX_RETRIES && !res.headersSent) {
@@ -1081,7 +1124,7 @@ function handleGetAvailableModelsProxy(res: http.ServerResponse, reqBody: Buffer
 // ─── Main Request Handler ─────────────────────────────────────────────────
 
 function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
-  req.url = req.url!.replace(/^.*\/dummy_path_padding/, '');
+  req.url = req.url!.replace(/^\/dummy_path_padding/, '');
   // Strip binary patch padding (from LS hostname replacement)
   req.url = req.url!.replace(/\/v1internal\/x{7}/, '');
 
@@ -1418,7 +1461,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
             const customModels = loadCustomModels();
             const mappedCustom: Record<string, unknown> = {};
             customModels.forEach((m) => {
-              const slug = toSlug(m);
+              const slug = m._slug || toSlug(m);
               mappedCustom[slug] = {
                 displayName: m.displayName,
                 name: slug,
@@ -1428,6 +1471,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
                 apiProvider: 'API_PROVIDER_GOOGLE_GEMINI',
                 modelProvider: 'MODEL_PROVIDER_GOOGLE',
               };
+              m._slug = slug;
             });
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ models: mappedCustom }));
@@ -1656,7 +1700,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
             const customModels = loadCustomModels();
             const mappedCustom: Record<string, unknown> = {};
             customModels.forEach((m) => {
-              const slug = toSlug(m);
+              const slug = m._slug || toSlug(m);
               mappedCustom[slug] = {
                 displayName: m.displayName,
                 name: slug,
@@ -1666,6 +1710,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
                 apiProvider: 'API_PROVIDER_GOOGLE_GEMINI',
                 modelProvider: 'MODEL_PROVIDER_GOOGLE',
               };
+              m._slug = slug;
             });
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ models: mappedCustom }));
@@ -1678,7 +1723,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
         const customModels = loadCustomModels();
         const mappedCustom: Record<string, unknown> = {};
         customModels.forEach((m) => {
-          const slug = toSlug(m);
+          const slug = m._slug || toSlug(m);
           mappedCustom[slug] = {
             displayName: m.displayName,
             name: slug,
@@ -1688,6 +1733,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
             apiProvider: 'API_PROVIDER_GOOGLE_GEMINI',
             modelProvider: 'MODEL_PROVIDER_GOOGLE',
           };
+          m._slug = slug;
         });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ models: mappedCustom }));

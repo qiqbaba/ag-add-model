@@ -144,6 +144,8 @@ describe('Dashboard and REST API endpoints', () => {
       apiUrl: 'https://api.deepseek.com/v1/chat/completions',
       apiKey: 'sk-ds-testkey',
       externalModelName: 'deepseek-chat',
+      supportsImages: true,
+      supportsThinking: true,
     };
 
     const res = await makeRequest('POST', '/api/models', JSON.stringify(newModel));
@@ -151,11 +153,20 @@ describe('Dashboard and REST API endpoints', () => {
     const json = JSON.parse(res.body);
     expect(json.success).toBe(true);
     expect(json.model.name).toBe('models/deepseek-v3');
+    expect(json.model.supportsImages).toBe(true);
+    expect(json.model.supportsThinking).toBe(true);
+    expect(json.model.capabilities.supportsImages).toBe(true);
+    expect(json.model.capabilities.isThinking).toBe(true);
 
-    // Verify GET /api/models now returns 2 models
+    // Verify GET /api/models now returns 2 models with capabilities
     const listRes = await makeRequest('GET', '/api/models');
     const listJson = JSON.parse(listRes.body);
     expect(listJson.length).toBe(2);
+    const added = listJson.find((m: { name: string }) => m.name === 'models/deepseek-v3');
+    expect(added.supportsImages).toBe(true);
+    expect(added.supportsThinking).toBe(true);
+    expect(added.capabilities.supportsImages).toBe(true);
+    expect(added.capabilities.isThinking).toBe(true);
   });
 
   it('should delete a model via DELETE /api/models', async () => {

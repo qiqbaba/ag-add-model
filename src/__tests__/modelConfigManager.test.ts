@@ -213,6 +213,63 @@ describe('modelConfigManager', () => {
     expect(res.error).toContain('models');
   });
 
+  it('should preserve existing apiKey when raw config contains masked key', () => {
+    const originalKey = 'sk-proj-1234567890abcdef';
+    const modelsBefore = readDecryptedModels();
+    expect(modelsBefore[0].apiKey).toBe(originalKey);
+
+    const rawWithMask = JSON.stringify({
+      models: [
+        {
+          name: 'models/gpt-4o',
+          displayName: 'GPT-4o Updated',
+          description: 'OpenAI model updated',
+          provider: 'openai',
+          apiUrl: 'https://api.openai.com/v1/chat/completions',
+          apiKey: 'sk-p••••••••cdef',
+          externalModelName: 'gpt-4o',
+        },
+      ],
+    });
+
+    const saveRes = saveRawConfig(rawWithMask);
+    expect(saveRes.success).toBe(true);
+
+    const modelsAfter = readDecryptedModels();
+    expect(modelsAfter.length).toBe(1);
+    expect(modelsAfter[0].displayName).toBe('GPT-4o Updated');
+    expect(modelsAfter[0].apiKey).toBe(originalKey);
+  });
+
+  it('should save, retrieve and respect explicit supportsImages and supportsThinking flags', () => {
+    const customModel = {
+      name: 'models/sensechat-v4',
+      displayName: '商汤 SenseChat V4',
+      description: '多模态商汤模型',
+      provider: 'openai',
+      apiUrl: 'https://api.sensenova.cn/v1/llm/chat-completions',
+      apiKey: 'sk-sense-12345678',
+      externalModelName: 'sensechat-v4',
+      supportsImages: true,
+      supportsThinking: true,
+    };
+
+    const saveRes = saveCustomModel(customModel);
+    expect(saveRes.success).toBe(true);
+    expect(saveRes.model?.capabilities.supportsImages).toBe(true);
+    expect(saveRes.model?.capabilities.isThinking).toBe(true);
+    expect(saveRes.model?.supportsImages).toBe(true);
+    expect(saveRes.model?.supportsThinking).toBe(true);
+
+    const vms = getModelsViewModel();
+    const found = vms.find((m) => m.name === 'models/sensechat-v4');
+    expect(found).toBeDefined();
+    expect(found?.supportsImages).toBe(true);
+    expect(found?.supportsThinking).toBe(true);
+    expect(found?.capabilities.supportsImages).toBe(true);
+    expect(found?.capabilities.isThinking).toBe(true);
+  });
+
   it('should return diagnostic system info', () => {
     const info = getSystemInfo(50999);
     expect(info.proxyPort).toBe(50999);

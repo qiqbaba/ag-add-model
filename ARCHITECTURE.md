@@ -310,7 +310,7 @@ OpenAI 兼容自定义模型（`openai` / `custom` / `openrouter` / `ollama` 等
 2. 避免把极长的 base64 字符串当作纯文本输入，从而浪费 Token 或触发上下文超长报错。
 
 > [!NOTE]
-> 视觉能力是否生效仍取决于模型本身：`modelUtils.ts` 的 `detectModelCapabilities()` 通过 `supportsImages` 字段集中检测模型是否支持图像。该转换只改变传输结构，不会强制不支持图像的模型解码图像。
+> 视觉与思考能力判定：`modelUtils.ts` 的 `detectModelCapabilities()` 支持通过配置中的 `supportsImages` / `supportsThinking` 字段显式指定（最高优先级），或在未指定时根据模型名称与 Provider 智能推断。代理会将该能力向 Antigravity IDE 声明并自动完成多模态视觉协议转换。
 
 ---
 

@@ -13,6 +13,8 @@ export interface StreamContext {
   terminalFinishReason?: string;
   /** Trailing partial tool-call marker held back to avoid leaking markup; flushed at stream end if it turns out to be plain text. */
   pendingHeldSuffix?: string;
+  /** Number of chars of accumulatedText already emitted as visible text (emission is strictly prefix-based). */
+  emittedLen?: number;
 }
 
 export interface StateTimestamps {
@@ -24,6 +26,10 @@ export interface StateTimestamps {
   translatedCalls: Map<string, number>;
   /** keyed by stateKey(modelName, sessionId) */
   reasoning: Map<string, number>;
+  /** keyed by stateKey(modelName, sessionId) */
+  toolNames: Map<string, number>;
+  /** keyed by stateKey(modelName, sessionId) */
+  toolSchemas: Map<string, number>;
 }
 
 export interface TranslatedCallInfo {
@@ -64,12 +70,20 @@ export const activeStreamContexts = new Map<string, StreamContext>();
 /** toolCallId → { originalName, translatedName, cmd, cwd } */
 export const translatedToolCalls = new Map<string, TranslatedCallInfo>();
 
+/** stateKey(modelName, sessionId) → declared tool names for this conversation (used to detect bare-tag text tool calls) */
+export const modelToolNames = new Map<string, Set<string>>();
+
+/** stateKey(modelName, sessionId) → declared tool parameter names: toolName → [paramName, ...] */
+export const modelToolSchemas = new Map<string, Record<string, string[]>>();
+
 /** State entry timestamps for periodic cleanup */
 export const stateTimestamps: StateTimestamps = {
   streamCtx: new Map(),
   toolCallIds: new Map(),
   translatedCalls: new Map(),
   reasoning: new Map(),
+  toolNames: new Map(),
+  toolSchemas: new Map(),
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -111,6 +125,18 @@ export function startCleanupInterval(): void {
       if (now - ts > TOOL_TTL) {
         modelReasoningContent.delete(key);
         stateTimestamps.reasoning.delete(key);
+      }
+    }
+    for (const [key, ts] of stateTimestamps.toolNames) {
+      if (now - ts > TOOL_TTL) {
+        modelToolNames.delete(key);
+        stateTimestamps.toolNames.delete(key);
+      }
+    }
+    for (const [key, ts] of stateTimestamps.toolSchemas) {
+      if (now - ts > TOOL_TTL) {
+        modelToolSchemas.delete(key);
+        stateTimestamps.toolSchemas.delete(key);
       }
     }
   }, 300_000);

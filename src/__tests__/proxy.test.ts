@@ -1,5 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
 import * as path from 'path';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as zlib from 'zlib';
+import { pathToFileURL } from 'url';
+import { resolveFileData, decompressResponseBody } from '../proxy';
 
 // We need to mock the external dependencies that proxy.ts imports at module level
 vi.mock('electron', () => ({
@@ -291,5 +296,114 @@ describe('multi-model agentModelSorts merge logic', () => {
     expect(slugA).not.toBe(slugB);
     expect(slugA).toBe('extm-deepseek-v4-flash');
     expect(slugB).toBe('extm-deepseek-v4-flash-0731');
+  });
+});
+
+describe('resolveFileData', () => {
+  it('correctly resolves local file:// URI and replaces parts element with text content', async () => {
+    const tmpDir = path.join(os.tmpdir(), 'proxy_filedata_test_' + Date.now());
+    fs.mkdirSync(tmpDir, { recursive: true });
+    const tmpFile = path.join(tmpDir, 'sample.txt');
+    fs.writeFileSync(tmpFile, 'Hello World from fileData', 'utf-8');
+
+    const fileUri = pathToFileURL(tmpFile).href;
+    const body = {
+      contents: [
+        {
+          parts: [
+            {
+              fileData: {
+                mimeType: 'text/plain',
+                fileUri: fileUri,
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    await resolveFileData(body, {});
+
+    expect(body.contents![0].parts![0]).toEqual({
+      text: '[File content]:\n\nHello World from fileData',
+    });
+
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch {}
+  });
+
+  it('gracefully handles missing local file without crashing', async () => {
+    const fakeUri = 'file:///non/existent/path/never_existed_' + Date.now() + '.txt';
+    const body = {
+      contents: [
+        {
+          parts: [
+            {
+              fileData: {
+                mimeType: 'text/plain',
+                fileUri: fakeUri,
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    await resolveFileData(body, {});
+    // Should remain fileData since resolving failed
+    expect(body.contents![0].parts![0]).toHaveProperty('fileData');
+  });
+});
+
+describe('decompressResponseBody', () => {
+  it('decompresses gzip payloads', () => {
+    const original = 'Hello, this is compressed via gzip!';
+    const compressed = zlib.gzipSync(Buffer.from(original, 'utf-8'));
+    const result = decompressResponseBody(compressed, 'gzip');
+    expect(result.decompressed).toBe(true);
+    expect(result.text).toBe(original);
+  });
+
+  it('decompresses brotli (br) payloads', () => {
+    const original = 'Hello, this is compressed via brotli!';
+    const compressed = zlib.brotliCompressSync(Buffer.from(original, 'utf-8'));
+    const result = decompressResponseBody(compressed, 'br');
+    expect(result.decompressed).toBe(true);
+    expect(result.text).toBe(original);
+  });
+
+  it('decompresses deflate payloads', () => {
+    const original = 'Hello, this is compressed via deflate!';
+    const compressed = zlib.deflateSync(Buffer.from(original, 'utf-8'));
+    const result = decompressResponseBody(compressed, 'deflate');
+    expect(result.decompressed).toBe(true);
+    expect(result.text).toBe(original);
+  });
+
+  it('handles identity or uncompressed payload', () => {
+    const original = 'Plain text response';
+    const buffer = Buffer.from(original, 'utf-8');
+    const result = decompressResponseBody(buffer, undefined);
+    expect(result.decompressed).toBe(true);
+    expect(result.text).toBe(original);
+  });
+
+  it('returns decompressed: false on corrupted compressed payload', () => {
+    const corruptBuffer = Buffer.from([0x1f, 0x8b, 0x00, 0x00, 0xff, 0xff]);
+    const result = decompressResponseBody(corruptBuffer, 'gzip');
+    expect(result.decompressed).toBe(false);
+  });
+});
+
+describe('URL rewrite regex', () => {
+  it('only strips /dummy_path_padding as a leading prefix', () => {
+    const urlWithPrefix = '/dummy_path_padding/v1internal:fetchAvailableModels';
+    const rewritten = urlWithPrefix.replace(/^\/dummy_path_padding/, '');
+    expect(rewritten).toBe('/v1internal:fetchAvailableModels');
+
+    const urlWithQueryParam = '/v1internal:fetchAvailableModels?redirect=/dummy_path_padding/test';
+    const untouched = urlWithQueryParam.replace(/^\/dummy_path_padding/, '');
+    expect(untouched).toBe(urlWithQueryParam);
   });
 });

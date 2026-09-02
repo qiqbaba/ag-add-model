@@ -21,6 +21,8 @@ export interface CustomModel {
   apiUrl: string;
   externalModelName: string;
   allowUnauthorized?: boolean;
+  supportsImages?: boolean;
+  supportsThinking?: boolean;
   encrypted?: boolean;
   _slug?: string;
   _placeholderId?: string;
@@ -40,6 +42,8 @@ export interface ModelViewModel {
   hasKey: boolean;
   encrypted: boolean;
   allowUnauthorized?: boolean;
+  supportsImages?: boolean;
+  supportsThinking?: boolean;
   timeout?: number;
   maxRetries?: number;
   slug: string;
@@ -216,6 +220,8 @@ export function getModelsViewModel(includeKeys = false): ModelViewModel[] {
       hasKey,
       encrypted: !!m.encrypted || hasKey,
       allowUnauthorized: m.allowUnauthorized,
+      supportsImages: m.supportsImages,
+      supportsThinking: m.supportsThinking,
       timeout: m.timeout,
       maxRetries: m.maxRetries,
       slug,
@@ -263,6 +269,8 @@ export function saveCustomModel(modelData: Partial<CustomModel>): {
     apiUrl: (modelData.apiUrl || '').trim(),
     externalModelName: (modelData.externalModelName || modelData.name || '').replace(/^models\//, '').trim(),
     allowUnauthorized: !!modelData.allowUnauthorized,
+    supportsImages: typeof modelData.supportsImages === 'boolean' ? modelData.supportsImages : undefined,
+    supportsThinking: typeof modelData.supportsThinking === 'boolean' ? modelData.supportsThinking : undefined,
     timeout: modelData.timeout ? Number(modelData.timeout) : undefined,
     maxRetries: modelData.maxRetries !== undefined ? Number(modelData.maxRetries) : undefined,
   };
@@ -368,6 +376,8 @@ export function saveCustomModels(modelList: Partial<CustomModel>[]): {
       apiUrl: (item.apiUrl || '').trim(),
       externalModelName: externalModelName || (item.name || '').replace(/^models\//, ''),
       allowUnauthorized: !!item.allowUnauthorized,
+      supportsImages: typeof item.supportsImages === 'boolean' ? item.supportsImages : undefined,
+      supportsThinking: typeof item.supportsThinking === 'boolean' ? item.supportsThinking : undefined,
       timeout: item.timeout ? Number(item.timeout) : undefined,
       maxRetries: item.maxRetries !== undefined ? Number(item.maxRetries) : undefined,
     };
@@ -502,6 +512,22 @@ export function saveRawConfig(rawJson: string): { success: boolean; error?: stri
     cryptoStore.backupFile(filePath);
     // Decrypt then encrypt to ensure consistent safeStorage encryption
     const decrypted = cryptoStore.decryptModels(parsed.models as CustomModel[]);
+
+    // If any model's apiKey contains masked characters (••••) or '(none)', restore the existing key if available
+    const currentDecrypted = readDecryptedModels();
+    const currentByName = new Map<string, CustomModel>();
+    for (const m of currentDecrypted) {
+      if (m.name) currentByName.set(m.name, m);
+    }
+    for (const m of decrypted) {
+      if (m.apiKey && (m.apiKey.includes('••••') || m.apiKey === '(none)')) {
+        const existing = currentByName.get(m.name);
+        if (existing && existing.apiKey && !existing.apiKey.includes('••••') && existing.apiKey !== '(none)') {
+          m.apiKey = existing.apiKey;
+        }
+      }
+    }
+
     const rawBlocker = getWriteBlocker(decrypted);
     if (rawBlocker) {
       return { success: false, error: rawBlocker };

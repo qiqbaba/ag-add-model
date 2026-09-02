@@ -1158,6 +1158,24 @@ export function renderDashboardHtml(): string {
           <input type="text" id="form-external-name" class="form-control" placeholder="例如: deepseek-chat, gpt-4o, claude-3-5-sonnet-20241022" />
         </div>
 
+        <!-- Model Capabilities Section -->
+        <div class="form-group" style="background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 12px 14px;">
+          <div style="font-size: 13px; font-weight: 600; margin-bottom: 8px; color: var(--text-main); display: flex; align-items: center; justify-content: space-between;">
+            <span>模型能力设置 (支持图片 / 深度思考)</span>
+            <span class="form-hint" style="font-size: 11px; margin: 0;">显式指定模型能力，无需修改显示名称</span>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 8px;">
+            <label class="checkbox-group" style="margin: 0; cursor: pointer;">
+              <input type="checkbox" id="form-supports-images" />
+              <span>🖼️ <strong>支持图片 / 视觉多模态</strong> (允许在 Antigravity 中上传图片并自动转换为目标视觉格式)</span>
+            </label>
+            <label class="checkbox-group" style="margin: 0; cursor: pointer;">
+              <input type="checkbox" id="form-supports-thinking" />
+              <span>🧠 <strong>支持深度思考 / 推理</strong> (在 Antigravity 中声明为思考模型并展示思考过程)</span>
+            </label>
+          </div>
+        </div>
+
         <!-- Advanced Options Accordion -->
         <div class="form-group">
           <div class="accordion-toggle" onclick="toggleAccordion('adv-options')">
@@ -1493,6 +1511,8 @@ export function renderDashboardHtml(): string {
       document.getElementById('form-api-url').value = '';
       document.getElementById('form-api-key').value = '';
       document.getElementById('form-key-hint').textContent = '将自动使用 safeStorage 加密存储';
+      document.getElementById('form-supports-images').checked = false;
+      document.getElementById('form-supports-thinking').checked = false;
       document.getElementById('form-allow-unauthorized').checked = false;
       document.getElementById('form-timeout').value = '';
       document.getElementById('form-max-retries').value = '';
@@ -1521,6 +1541,8 @@ export function renderDashboardHtml(): string {
         document.getElementById('form-api-url').value = m.apiUrl || '';
         document.getElementById('form-api-key').value = m.apiKey || '';
         document.getElementById('form-key-hint').textContent = m.apiKey ? '已配置 API Key (如无需修改请留空或保持原样)' : '未配置 API Key';
+        document.getElementById('form-supports-images').checked = m.supportsImages !== undefined ? !!m.supportsImages : (m.capabilities ? !!m.capabilities.supportsImages : false);
+        document.getElementById('form-supports-thinking').checked = m.supportsThinking !== undefined ? !!m.supportsThinking : (m.capabilities ? !!m.capabilities.isThinking : false);
         document.getElementById('form-allow-unauthorized').checked = !!m.allowUnauthorized;
         document.getElementById('form-timeout').value = m.timeout || '';
         document.getElementById('form-max-retries').value = m.maxRetries !== undefined ? m.maxRetries : '';
@@ -1855,6 +1877,8 @@ export function renderDashboardHtml(): string {
         provider: document.getElementById('form-provider').value,
         apiUrl: document.getElementById('form-api-url').value.trim(),
         apiKey: document.getElementById('form-api-key').value.trim(),
+        supportsImages: document.getElementById('form-supports-images').checked,
+        supportsThinking: document.getElementById('form-supports-thinking').checked,
         allowUnauthorized: document.getElementById('form-allow-unauthorized').checked,
         timeout: parseInt(document.getElementById('form-timeout').value, 10) || undefined,
         maxRetries: document.getElementById('form-max-retries').value !== '' ? parseInt(document.getElementById('form-max-retries').value, 10) : undefined,
@@ -1924,6 +1948,8 @@ export function renderDashboardHtml(): string {
           externalModelName: 'deepseek-chat',
           provider: 'openai',
           apiUrl: 'https://api.deepseek.com/v1/chat/completions',
+          supportsImages: false,
+          supportsThinking: false,
         },
         'deepseek-r1': {
           displayName: 'DeepSeek-R1 (深度思考)',
@@ -1931,6 +1957,8 @@ export function renderDashboardHtml(): string {
           externalModelName: 'deepseek-reasoner',
           provider: 'openai',
           apiUrl: 'https://api.deepseek.com/v1/chat/completions',
+          supportsImages: false,
+          supportsThinking: true,
         },
         'openai-gpt4o': {
           displayName: 'GPT-4o (OpenAI 官方)',
@@ -1938,6 +1966,8 @@ export function renderDashboardHtml(): string {
           externalModelName: 'gpt-4o',
           provider: 'openai',
           apiUrl: 'https://api.openai.com/v1/chat/completions',
+          supportsImages: true,
+          supportsThinking: false,
         },
         'anthropic-claude': {
           displayName: 'Claude 3.5 Sonnet (Anthropic)',
@@ -1945,6 +1975,8 @@ export function renderDashboardHtml(): string {
           externalModelName: 'claude-3-5-sonnet-20241022',
           provider: 'anthropic',
           apiUrl: 'https://api.anthropic.com/v1/messages',
+          supportsImages: true,
+          supportsThinking: true,
         },
         'ollama-local': {
           displayName: 'Llama 3 (本地 Ollama)',
@@ -1952,6 +1984,8 @@ export function renderDashboardHtml(): string {
           externalModelName: 'llama3',
           provider: 'ollama',
           apiUrl: 'http://localhost:11434/v1/chat/completions',
+          supportsImages: false,
+          supportsThinking: false,
         },
         'openrouter': {
           displayName: 'Claude 3.5 via OpenRouter',
@@ -1959,6 +1993,8 @@ export function renderDashboardHtml(): string {
           externalModelName: 'anthropic/claude-3.5-sonnet',
           provider: 'openai',
           apiUrl: 'https://openrouter.ai/api/v1/chat/completions',
+          supportsImages: true,
+          supportsThinking: true,
         },
         'siliconflow': {
           displayName: 'DeepSeek-V3 (硅基流动)',
@@ -1966,6 +2002,8 @@ export function renderDashboardHtml(): string {
           externalModelName: 'deepseek-ai/DeepSeek-V3',
           provider: 'openai',
           apiUrl: 'https://api.siliconflow.cn/v1/chat/completions',
+          supportsImages: false,
+          supportsThinking: false,
         },
         'sensenova': {
           displayName: 'SenseChat-5 (商汤日日新)',
@@ -1973,6 +2011,8 @@ export function renderDashboardHtml(): string {
           externalModelName: 'SenseChat-5',
           provider: 'openai',
           apiUrl: 'https://api.sensenova.cn/v1/llm/chat-completions',
+          supportsImages: false,
+          supportsThinking: false,
         },
         'moonshot': {
           displayName: 'Kimi (月之暗面)',
@@ -1980,6 +2020,8 @@ export function renderDashboardHtml(): string {
           externalModelName: 'moonshot-v1-32k',
           provider: 'openai',
           apiUrl: 'https://api.moonshot.cn/v1/chat/completions',
+          supportsImages: true,
+          supportsThinking: false,
         },
         'google-ai': {
           displayName: 'Gemini 2.0 Flash (AI Studio)',
@@ -1987,6 +2029,8 @@ export function renderDashboardHtml(): string {
           externalModelName: 'gemini-2.0-flash',
           provider: 'google',
           apiUrl: 'https://generativelanguage.googleapis.com/v1beta',
+          supportsImages: true,
+          supportsThinking: false,
         }
       };
 
@@ -1997,6 +2041,8 @@ export function renderDashboardHtml(): string {
         document.getElementById('form-external-name').value = p.externalModelName;
         document.getElementById('form-provider').value = p.provider;
         document.getElementById('form-api-url').value = p.apiUrl;
+        document.getElementById('form-supports-images').checked = !!p.supportsImages;
+        document.getElementById('form-supports-thinking').checked = !!p.supportsThinking;
       }
     }
 
