@@ -210,13 +210,26 @@ function hasUnclosedToolCallBlock(text: string): boolean {
   const dsmlCloses = (text.match(/<\/DSML\|/g) || []).length;
   if (dsmlOpens > dsmlCloses) return true;
 
-  const tcOpens = (text.match(/<tool_call[>\s]/g) || []).length;
-  const tcCloses = (text.match(/<\/tool_call>/g) || []).length;
-  if (tcOpens > tcCloses) return true;
+  // Symmetric <tool_call> / <function_call> opens vs closes.
+  const symOpens = (text.match(/<(?:tool_call|function_call)[>\s]/g) || []).length;
+  const symCloses = (text.match(/<\/(?:tool_call|function_call)>/g) || []).length;
+  if (symOpens > symCloses) return true;
 
-  const fcOpens = (text.match(/<function_call[>\s]/g) || []).length;
-  const fcCloses = (text.match(/<\/function_call>/g) || []).length;
-  if (fcOpens > fcCloses) return true;
+  // Asymmetric colon form <tool_call:name> ... </name> / </tool_call:name>.
+  // The symmetric count above deliberately ignores the colon form (':' is not in
+  // [>\s]), so pair each colon-open with a matching named close here. An
+  // outstanding colon-open means the block is still open. Without this pairing,
+  // a properly-closed <tool_call:name>...</name> would read as opens>closes and
+  // hold the stream forever.
+  const colonOpenRegex = /<(?:tool_call|function_call):([A-Za-z_]\w*)[>\s]/g;
+  let cm: RegExpExecArray | null;
+  let colonOpen = 0;
+  while ((cm = colonOpenRegex.exec(text)) !== null) {
+    const name = cm[1];
+    const namedClose = new RegExp(`</(?:${name}|tool_call:${name}|function_call:${name})>`);
+    if (!namedClose.test(text)) colonOpen++;
+  }
+  if (colonOpen > 0) return true;
 
   // An opening "<call:" with no closing ">" yet (checked relative to the LAST
   // occurrence — the old !text.includes('>') condition was virtually never true).
@@ -229,28 +242,54 @@ function hasUnclosedToolCallBlock(text: string): boolean {
 
 /**
  * Returns true when `text` contains an unclosed bare lean tool tag
- * (e.g. `<run_command>` without its `</run_command>`) for any known tool name.
+ * (e.g. `<run_command>` without its `</run_command>`) for any known tool name,
+ * but only counting a bare tag that sits at a block boundary (start of text or
+ * first non-whitespace on its own line) and outside a markdown code fence.
+ * An inline `<view_file>` in prose is quoted text, not a tool-call start.
  */
 function hasUnclosedBareToolBlock(text: string, toolNames: string[]): boolean {
   for (const name of toolNames) {
     const open = `<${name}>`;
-    const close = `</${name}>`;
-    let opens = 0;
+    let boundaryOpens = 0;
     let idx = text.indexOf(open);
     while (idx !== -1) {
-      opens++;
+      if (isBlockBoundaryAndNotFenced(text, idx)) boundaryOpens++;
       idx = text.indexOf(open, idx + open.length);
     }
-    if (opens === 0) continue;
+    if (boundaryOpens === 0) continue;
     let closes = 0;
+    const close = `</${name}>`;
     idx = text.indexOf(close);
     while (idx !== -1) {
       closes++;
       idx = text.indexOf(close, idx + close.length);
     }
-    if (opens > closes) return true;
+    if (boundaryOpens > closes) return true;
   }
   return false;
+}
+
+/**
+ * Finds the earliest index in the current delta `text` at which a bare tool
+ * open tag (`<name>`) sits at a block boundary and outside a code fence.
+ * `combined` is the accumulated stream text (prevAcc + text); `prevLen` is the
+ * length of prevAcc, so a bare tag position is expressed in `combined` coords.
+ * Returns -1 when no boundary-gated bare open tag is present in this delta.
+ */
+function findEarliestBareMarkerIdx(combined: string, text: string, prevLen: number, toolNames: string[]): number {
+  let earliest = -1;
+  for (const name of toolNames) {
+    const open = `<${name}>`;
+    let idx = text.indexOf(open);
+    while (idx !== -1) {
+      if (isBlockBoundaryAndNotFenced(combined, prevLen + idx)) {
+        if (earliest === -1 || idx < earliest) earliest = idx;
+        break;
+      }
+      idx = text.indexOf(open, idx + open.length);
+    }
+  }
+  return earliest;
 }
 
 /**
@@ -859,53 +898,22 @@ function parseDSMLToolCalls(
       functionCalls.push({ name, args });
     };
 
-    // Pass 1: DSML invoke / tool_call tags
-    const dsmlCallRegex = /<DSML\|(?:invoke|tool_call)\s+name="([^"]+)">([\s\S]*?)<\/DSML\|(?:invoke|tool_call)>/g;
-    let match: RegExpExecArray | null;
-    while ((match = dsmlCallRegex.exec(text)) !== null) {
-      if (match[0]) pushCall(match[1], match[2], match[0]);
-    }
-
-    // Pass 2: XML tool call tags with name attribute: <tool_call name="...">, <function_call name="...">, <tool name="...">, <action name="...">
-    const xmlNamedRegex =
-      /<(?:tool_call|function_call|tool|action)\s+name="([^"]+)"[^>]*>([\s\S]*?)<\/(?:tool_call|function_call|tool|action)>/g;
-    while ((match = xmlNamedRegex.exec(text)) !== null) {
-      if (match[0]) pushCall(match[1], match[2], match[0]);
-    }
-
-    // Pass 3: Tag name contains the function name: <DSML|_command>{...}</DSML|_command> or <tool_call:funcName>{...}</tool_call:funcName>
-    const tagNamedRegex =
-      /<(?:DSML\||tool_call:|function_call:)((?!tool_calls|tool_call|invoke|parameter)[A-Za-z_][\w]*)>([\s\S]*?)<\/(?:DSML\||tool_call:|function_call:)\1>/g;
-    while ((match = tagNamedRegex.exec(text)) !== null) {
-      if (match[0]) pushCall(match[1], match[2], match[0]);
-    }
-
-    // Pass 3b: Asymmetric close — the closing tag repeats only the function name,
-    // NOT the full prefix: <tool_call:list_dir>{...}</list_dir> (GLM / SenseNova).
-    // The symmetric requirement in Pass 3 above misses this, causing the whole
-    // block to leak as visible text (see image 2).
-    const asymTagNamedRegex =
-      /<(?:DSML\||tool_call:|function_call:)((?!tool_calls|tool_call|invoke|parameter)[A-Za-z_][\w]*)>([\s\S]*?)<\/\1>/g;
-    while ((match = asymTagNamedRegex.exec(text)) !== null) {
-      if (match[0]) pushCall(match[1], match[2], match[0]);
-    }
-
-    // Pass 4: Tag without name attribute: <tool_call>...</tool_call> or <function_call>...</function_call>
-    const genericBlockRegex = /<(?:tool_call|function_call)>([\s\S]*?)<\/(?:tool_call|function_call)>/g;
-    while ((match = genericBlockRegex.exec(text)) !== null) {
-      const full = match[0];
-      const body = match[1].trim();
-      const jsonObj = extractJsonObject(body);
-      if (jsonObj && (jsonObj.name || jsonObj.function || jsonObj.tool)) {
-        const rawName = (jsonObj.name || jsonObj.function || jsonObj.tool) as string;
-        pushCall(rawName, body, full);
-      } else {
-        const split = splitToolNameAndArgs(body);
-        if (split) {
-          pushCall(split.name, split.argsBlock, full);
-        }
+    /**
+     * Validates a tool-call candidate for the boundary passes, also accepting a
+     * translatable native name (run_command) that maps to a declared tool. The
+     * session schema records declared names (e.g. list_dir); a model that emits a
+     * bare <run_command> with a CommandLine should still be accepted when it maps
+     * to a declared tool, otherwise a legit call is wrongly rejected.
+     */
+    const validateForPass = (name: string, args: Record<string, unknown>): boolean => {
+      if (!paramSchemas) return true;
+      if (validateBareArgs(name, args)) return true;
+      if (name === 'run_command' && args.CommandLine !== undefined) {
+        const tr = translateToolCallToNative(name, args as ToolCallArgs);
+        return !!paramSchemas[tr.name];
       }
-    }
+      return false;
+    };
 
     /**
      * A bare tag counts as a REAL tool call only when it sits at a block
@@ -927,6 +935,55 @@ function parseDSMLToolCalls(
       return (before.match(/```/g) || []).length % 2 !== 0;
     };
 
+    // Pass 1: DSML invoke / tool_call tags
+    const dsmlCallRegex = /<DSML\|(?:invoke|tool_call)\s+name="([^"]+)">([\s\S]*?)<\/DSML\|(?:invoke|tool_call)>/g;
+    let match: RegExpExecArray | null;
+    while ((match = dsmlCallRegex.exec(text)) !== null) {
+      if (match[0] && !insideCodeFence(match.index)) pushCall(match[1], match[2], match[0], validateForPass);
+    }
+
+    // Pass 2: XML tool call tags with name attribute: <tool_call name="...">, <function_call name="...">, <tool name="...">, <action name="...">
+    const xmlNamedRegex =
+      /<(?:tool_call|function_call|tool|action)\s+name="([^"]+)"[^>]*>([\s\S]*?)<\/(?:tool_call|function_call|tool|action)>/g;
+    while ((match = xmlNamedRegex.exec(text)) !== null) {
+      if (match[0] && !insideCodeFence(match.index)) pushCall(match[1], match[2], match[0], validateForPass);
+    }
+
+    // Pass 3: Tag name contains the function name: <DSML|_command>{...}</DSML|_command> or <tool_call:funcName>{...}</tool_call:funcName>
+    const tagNamedRegex =
+      /<(?:DSML\||tool_call:|function_call:)((?!tool_calls|tool_call|invoke|parameter)[A-Za-z_][\w]*)>([\s\S]*?)<\/(?:DSML\||tool_call:|function_call:)\1>/g;
+    while ((match = tagNamedRegex.exec(text)) !== null) {
+      if (match[0] && !insideCodeFence(match.index)) pushCall(match[1], match[2], match[0], validateForPass);
+    }
+
+    // Pass 3b: Asymmetric close — the closing tag repeats only the function name,
+    // NOT the full prefix: <tool_call:list_dir>{...}</list_dir> (GLM / SenseNova).
+    // The symmetric requirement in Pass 3 above misses this, causing the whole
+    // block to leak as visible text (see image 2).
+    const asymTagNamedRegex =
+      /<(?:DSML\||tool_call:|function_call:)((?!tool_calls|tool_call|invoke|parameter)[A-Za-z_][\w]*)>([\s\S]*?)<\/\1>/g;
+    while ((match = asymTagNamedRegex.exec(text)) !== null) {
+      if (match[0] && !insideCodeFence(match.index)) pushCall(match[1], match[2], match[0], validateForPass);
+    }
+
+    // Pass 4: Tag without name attribute: <tool_call>...</tool_call> or <function_call>...</function_call>
+    const genericBlockRegex = /<(?:tool_call|function_call)>([\s\S]*?)<\/(?:tool_call|function_call)>/g;
+    while ((match = genericBlockRegex.exec(text)) !== null) {
+      if (insideCodeFence(match.index)) continue;
+      const full = match[0];
+      const body = match[1].trim();
+      const jsonObj = extractJsonObject(body);
+      if (jsonObj && (jsonObj.name || jsonObj.function || jsonObj.tool)) {
+        const rawName = (jsonObj.name || jsonObj.function || jsonObj.tool) as string;
+        pushCall(rawName, body, full, validateForPass);
+      } else {
+        const split = splitToolNameAndArgs(body);
+        if (split) {
+          pushCall(split.name, split.argsBlock, full, validateForPass);
+        }
+      }
+    }
+
     // Pass 4b: Antigravity lean bare tags: <run_command>{...}</run_command> or
     // <view_file>\nParam>value\n</view_file> — matched against known tool names.
     // Must run BEFORE the unclosed-block passes so a closed bare tag is not
@@ -936,25 +993,30 @@ function parseDSMLToolCalls(
       const bareTagRegex = new RegExp(`<(${namesAlt})>([\\s\\S]*?)<\\/\\1>`, 'g');
       while ((match = bareTagRegex.exec(text)) !== null) {
         if (match[0] && atBlockBoundary(match.index) && !insideCodeFence(match.index)) {
-          pushCall(match[1], match[2], match[0], validateBareArgs);
+          pushCall(match[1], match[2], match[0], validateForPass);
         }
       }
     }
 
     // Pass 5: Unclosed <tool_call> / <function_call> (only when explicitly allowed, e.g. stream finish or completed args)
     if (allowUnclosed && functionCalls.length === 0) {
-      const unclosedRegex = /<(?:tool_call|function_call)>([\s\S]+)$/g;
+      // Both unclosed <tool_call>{...} and <tool_call:name>{...} are recovered
+      // here. The optional name group (match[1]) is preferred over the JSON body.
+      const unclosedRegex = /<(?:tool_call|function_call)(?::([A-Za-z_]\w*))?>([\s\S]+)$/g;
       while ((match = unclosedRegex.exec(text)) !== null) {
+        if (insideCodeFence(match.index)) continue;
         const full = match[0];
-        const body = match[1].trim();
+        const tagName = match[1];
+        const body = match[2].trim();
         const jsonObj = extractJsonObject(body);
-        if (jsonObj && (jsonObj.name || jsonObj.function || jsonObj.tool)) {
-          const rawName = (jsonObj.name || jsonObj.function || jsonObj.tool) as string;
-          pushCall(rawName, body, full);
+        if (tagName && !(jsonObj && jsonObj.name)) {
+          pushCall(tagName, body, full, validateForPass);
+        } else if (jsonObj && (jsonObj.name || jsonObj.function || jsonObj.tool)) {
+          pushCall((jsonObj.name || jsonObj.function || jsonObj.tool) as string, body, full, validateForPass);
         } else {
           const split = splitToolNameAndArgs(body);
           if (split && split.argsBlock) {
-            pushCall(split.name, split.argsBlock, full);
+            pushCall(split.name, split.argsBlock, full, validateForPass);
           }
         }
       }
@@ -966,7 +1028,7 @@ function parseDSMLToolCalls(
           const full = match[0];
           const body = match[2].trim();
           if (body && atBlockBoundary(match.index) && !insideCodeFence(match.index)) {
-            pushCall(match[1], body, full, validateBareArgs);
+            pushCall(match[1], body, full, validateForPass);
           }
         }
       }
@@ -975,7 +1037,7 @@ function parseDSMLToolCalls(
     // Pass 6: Antigravity-style call tags: <call:default_api:funcName{...}> or <call:funcName{...}>
     const agyCallRegex = /<call:(?:default_api:)?([a-zA-Z0-9_-]+)([\s\S]*?)>/g;
     while ((match = agyCallRegex.exec(text)) !== null) {
-      if (match[0]) pushCall(match[1], match[2], match[0]);
+      if (match[0] && !insideCodeFence(match.index)) pushCall(match[1], match[2], match[0], validateForPass);
     }
 
     // Pass 7: Markdown code block: ```tool_call\nfunc\n{...}\n```
@@ -985,15 +1047,15 @@ function parseDSMLToolCalls(
       const explicitName = match[1];
       const blockContent = match[2].trim();
       if (explicitName) {
-        pushCall(explicitName, blockContent, full);
+        pushCall(explicitName, blockContent, full, validateForPass);
       } else {
         const jsonObj = extractJsonObject(blockContent);
         if (jsonObj && jsonObj.name) {
-          pushCall(jsonObj.name as string, blockContent, full);
+          pushCall(jsonObj.name as string, blockContent, full, validateForPass);
         } else {
           const split = splitToolNameAndArgs(blockContent);
           if (split) {
-            pushCall(split.name, split.argsBlock, full);
+            pushCall(split.name, split.argsBlock, full, validateForPass);
           }
         }
       }
@@ -1176,7 +1238,8 @@ export function mapOpenAIChunkToGemini(
   const leanToolNames = getLeanToolNames(stateKeyStr);
   const leanParamSchemas = modelToolSchemas.get(stateKeyStr) ?? null;
   const prevAcc = context.accumulatedText.slice(0, context.accumulatedText.length - text.length);
-  const alreadyInsideToolBlock = hasUnclosedToolCallBlock(prevAcc);
+  const alreadyInsideToolBlock =
+    hasUnclosedToolCallBlock(prevAcc) || hasUnclosedBareToolBlock(prevAcc, leanToolNames);
   const emitParts: GeminiPart[] = [];
   if (reasoning) emitParts.push({ text: reasoning, thought: true });
   if (text) {
@@ -1190,14 +1253,23 @@ export function mapOpenAIChunkToGemini(
           earliestIdx = idx;
         }
       }
+      // Bare open tags (<run_command> etc.) are also tool-call starts, but only
+      // when they sit at a block boundary & outside a code fence. Match them
+      // against the accumulated text so the boundary test sees the whole stream
+      // so far (prevAcc + this delta).
+      const bareIdx = findEarliestBareMarkerIdx(context.accumulatedText, text, prevAcc.length, leanToolNames);
+      if (bareIdx >= 0 && (earliestIdx === -1 || bareIdx < earliestIdx)) earliestIdx = bareIdx;
+
       let safePrefix = earliestIdx >= 0 ? text.slice(0, earliestIdx) : text;
       if (earliestIdx === -1) {
         // A tool-call marker may be split across chunk boundaries (e.g. chunk
         // ends with "<tool_" and the next chunk starts with "call>"). Hold back
-        // the trailing partial-marker suffix so it never leaks as visible text;
-        // it stays in accumulatedText and is re-evaluated with the next delta.
+        // the trailing partial-marker suffix (standard markers + bare open tags)
+        // so it never leaks as visible text; it stays in accumulatedText and is
+        // re-evaluated with the next delta.
+        const markers = [...TOOL_CALL_START_MARKERS, ...leanToolNames.map((n) => `<${n}>`)];
         let holdLen = 0;
-        for (const marker of TOOL_CALL_START_MARKERS) {
+        for (const marker of markers) {
           const maxCheck = Math.min(marker.length - 1, text.length);
           for (let len = maxCheck; len > holdLen; len--) {
             if (text.endsWith(marker.slice(0, len))) {
@@ -1213,13 +1285,16 @@ export function mapOpenAIChunkToGemini(
           delete context.pendingHeldSuffix;
         }
       }
-      if (safePrefix) emitParts.push({ text: safePrefix });
+      if (safePrefix) {
+        emitParts.push({ text: safePrefix });
+        context.emittedLen = (context.emittedLen ?? 0) + safePrefix.length;
+      }
     }
   }
 
   // If this stream already emitted a TOOL_CALL, suppress subsequent STOP/OTHER chunks so tool call is not cancelled
   if (context.hasEmittedToolCall) {
-    if (choice.finish_reason === 'stop' || choice.finish_reason === 'length' || choice.finish_reason === 'tool_calls') {
+    if (choice.finish_reason === 'stop' || choice.finish_reason === 'length' || choice.finish_reason === 'tool_calls' || choice.finish_reason === 'function_call') {
       activeStreamContexts.delete(streamId);
     }
     return null;
@@ -1251,12 +1326,17 @@ export function mapOpenAIChunkToGemini(
       parts.push({ functionCall: { name: tr.name, args: tr.args as Record<string, unknown>, id: callId } });
     });
     context.accumulatedText = '';
+    context.emittedLen = 0;
     context.hasEmittedToolCall = true;
+    // If this frame is terminal (carries a finish_reason), no later frame will
+    // reach the hasEmittedToolCall cleanup below, so free the stream context now
+    // (RC8) to avoid leaking it into the next stream with the same id.
+    if (choice.finish_reason) activeStreamContexts.delete(streamId);
     return { content: { parts, role: 'model' }, finishReason: 'STOP', index: 0 };
   }
 
   const finishReason = choice.finish_reason;
-  if (finishReason === 'stop' || finishReason === 'length') {
+  if (finishReason === 'stop' || finishReason === 'length' || finishReason === 'function_call') {
     // Check for pending native tool_calls before closing stream
     // A tool call with empty arguments ("{}"/"") is still a valid no-arg call —
     // don't filter it out (JSON.parse falls back to {} below).
@@ -1323,12 +1403,14 @@ export function mapOpenAIChunkToGemini(
         return { content: { parts, role: 'model' }, finishReason: 'STOP', index: 0 };
       }
     }
-    // Flush any held-back partial marker that turned out to be plain text
-    // (it was withheld only to prevent markup leakage, not to be dropped).
-    if (context.pendingHeldSuffix) {
-      emitParts.push({ text: context.pendingHeldSuffix });
-      delete context.pendingHeldSuffix;
-    }
+    // Flush any held-back partial marker / un-emitted tool-block text that
+    // turned out to be plain text (it was withheld only to prevent markup
+    // leakage, not to be dropped). emittedLen tracks the prefix already emitted
+    // as visible text, so accumulatedText.slice(emittedLen) is exactly the
+    // held/withheld remainder.
+    const unemitted = context.accumulatedText.slice(context.emittedLen ?? 0);
+    if (unemitted) emitParts.push({ text: unemitted });
+    delete context.pendingHeldSuffix;
     activeStreamContexts.delete(streamId);
     return {
       content: { parts: emitParts, role: 'model' },

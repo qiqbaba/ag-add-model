@@ -49,7 +49,7 @@ const 组长拆解 = await agent(
   {
     provider: 组长.provider,
     model: 组长.model,
-    label: '组长-拆解分配',
+    label: `组长-拆解分配 [${组长.provider}/${组长.model}]`,
     schema: {
       type: 'object',
       properties: {
@@ -84,7 +84,7 @@ const 组员结果 = await Promise.all(
     const m = 组员们[i % 组员们.length];
     return agent(
       `你是组员（${m.label}）。请完成子任务：${t.title}\n执行提示：${t.hint}`,
-      { provider: m.provider, model: m.model, label: `组员-${t.id}` },
+      { provider: m.provider, model: m.model, label: `组员-${t.id} [${m.provider}/${m.model}]` },
     );
   }),
 );
@@ -94,7 +94,7 @@ phase('组长汇总复核');
 const 最终交付 = await agent(
   `你是组长（${组长.label}）。以下是各子任务与对应组员输出，请合并、交叉复核，修正明显错误，给出最终交付物。\n\n` +
   子任务.map((t, i) => JSON.stringify({ 子任务: t, 组员输出: 组员结果[i] })).join('\n\n'),
-  { provider: 组长.provider, model: 组长.model, label: '组长-汇总复核' },
+  { provider: 组长.provider, model: 组长.model, label: `组长-汇总复核 [${组长.provider}/${组长.model}]` },
 );
 
 return {

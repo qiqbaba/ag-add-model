@@ -188,3 +188,22 @@
 ---
 
 *报告完。本报告为基于本地会话日志的复盘，技术结论以会话中原助手分析为准；"当前是否彻底解决"因缺少用户最终确认，如实标注为"仍未确认/仍需验证"。*
+
+---
+
+## 八、本次落地修复（2026-09-03）
+
+在上文复盘基础之上，本次基于**两轮 lead-worker（BAI 组长模型）根因核验 + 对源码逐条比对**，针对 `src/proxy/translators/openai.ts` 实施并验证了最小修复（根因与补丁细节见 `docs/` 目录的根因与最小修复文档）：
+
+1. **RC1**：`hasUnclosedToolCallBlock` 识别冒号非对称 `<tool_call:name>` 并配对闭合，杜绝「opens>closes 永真」导致的无限扣留。
+2. **RC1 / 中间帧泄漏**：流式发射器接入裸标签（基于 `isBlockBoundaryAndNotFenced` 的边界+围栏门控），并跟踪 `emittedLen`，修复 `<run_command>` 等裸标签在中间帧透出、以及「解析失败时静默丢弃正文」。
+3. **RC2**：Pass5 的 `unclosedRegex` 兼容 `<tool_call:name>{json}`（无闭合），修复未闭合标签的泄漏与「调用丢失 + 提前 STOP」。
+4. **RC3 / RC4**：新增 `validateForPass` 并扩散到各 Pass（未声明工具名不再误放行，避免 `invalid tool call` 中止整轮），并把代码围栏检查前移到多个 Pass。
+5. **RC5 / RC8**：流式 `finish_reason='function_call'` 纳入工具调用收口，并在收口帧正确清理 `activeStreamContexts`。
+6. **G6**：原本定义但未接线的 `hasUnclosedBareToolBlock` / `isBlockBoundaryAndNotFenced` 正式接线。
+
+**验证**：258 项测试全部通过（236 基线 + 20 回归，其中 7 个「pin」用例已从固化旧缺陷行为翻转为期望行为；另新增 2 个防回归用例）。`tsc --noEmit` 0 错误，`dist` 已重建。
+
+**部署**：已将修复后的 `dist\proxy\translators\openai.js` 覆盖到 Antigravity IDE 安装目录资源（`...\resources\app\out\proxy\proxy\translators\openai.js`），原文件备份为同目录 `openai.js.bak-20260903_104513`。IDE 重启后生效。
+
+> 注：本文档早前的「当前是否彻底解决仍未确认」现已被本次落地修复与全部单测、部署验证更新；但**在真实 IDE 会话中是否对 GLM 5.2 / BAI V4 Flash / BAI V4 Flash Vision 完全生效**，仍以用户 IDE 重启后实测为准。
