@@ -423,3 +423,161 @@ describe('regression g: post-fix anti-regression guards', () => {
     expect(shared.activeStreamContexts.size).toBe(0);
   });
 });
+
+// ═══ h) 修复回归防回归（8cf2312 引入的 A/B 回归，补丁1+3 修复）══════════════
+describe('regression h: native-model content loss & emittedLen misalignment guarded', () => {
+  it('h1 [回归A防回归] 原生模型正文含行首裸标签 + native tool_calls 收口时正文完整且调用发射', () => {
+    const sid = 'reg_A_native';
+    const chunks = [
+      { id: sid, choices: [{ delta: { content: '方法一是在终端运行：\n<run_command>' }, index: 0 }] },
+      {
+        id: sid,
+        choices: [
+          {
+            delta: { content: '（注意标签要闭合）', tool_calls: [{ index: 0, id: 'tc1', function: { name: 'list_dir', arguments: '{"DirectoryPath":"."}' } }] },
+            finish_reason: 'tool_calls',
+            index: 0,
+          },
+        ],
+      },
+    ];
+    // 修复前：被净的正文「（注意标签要闭合）」在 native 收口时丢失。修复后：补丁3 使
+    // nativeSeen 后不再 hold 正文，正文完整发射；调用也正常发射。
+    const results = chunks.map((c) => mapOpenAIChunkToGemini(c, 'sensenova'));
+    const texts = collectTexts(results);
+    expect(texts.includes('方法一是在终端运行：')).toBe(true);
+    expect(texts.includes('（注意标签要闭合）')).toBe(true);
+    const fc = collectFcs(results);
+    expect(fc.length).toBe(1);
+    expect(fc[0].name).toBe('list_dir');
+  });
+
+  it('h2 [回归B防回归] marker 跨 chunk 切分 + stop 无调用时全文恰一发、无重复', () => {
+    const sid = 'reg_B_marker_split';
+    const chunks = [
+      { id: sid, choices: [{ delta: { content: '示例：<tool_' }, index: 0 }] },
+      { id: sid, choices: [{ delta: { content: 'call>{"x":1}\n说明正文。' }, index: 0 }] },
+      { id: sid, choices: [{ delta: {}, finish_reason: 'stop', index: 0 }] },
+    ];
+    const results = chunks.map((c) => mapOpenAIChunkToGemini(c, 'glm-5.2'));
+    const allText = collectTexts(results);
+    const count = (s: string, sub: string) => s.split(sub).length - 1;
+    // 修复前：emittedLen 记账错位 → 尾部「说明正文。」被重复发射；修复后 withheldText 显式缓冲，
+    // 原文恰一发、不重复（跨 chunk 前缀 `<tool_` 按收口补发保留）。
+    expect(count(allText, '说明正文。')).toBe(1);
+    expect(allText).toContain('示例：');
+    expect(allText).toContain('<tool_');
+    expect(allText).toContain('call>{"x":1}');
+  });
+
+  it('h3 [纯净原生流 pin] 正文 + 分帧 native tool_calls + finish=tool_calls 输出与旧版一致', () => {
+    const sid = 'reg_R3_native_pure';
+    const chunks = [
+      { id: sid, choices: [{ delta: { content: '我来查看目录。' }, index: 0 }] },
+      { id: sid, choices: [{ delta: { tool_calls: [{ index: 0, id: 'n1', function: { name: 'list_dir', arguments: '{"DirectoryPath":"."}' } }] }, index: 0 }] },
+      { id: sid, choices: [{ delta: {}, finish_reason: 'tool_calls', index: 0 }] },
+    ];
+    const results = chunks.map((c) => mapOpenAIChunkToGemini(c, 'deepseek-v4-flash'));
+    const texts = collectTexts(results);
+    expect(texts).toContain('我来查看目录。');
+    const fc = collectFcs(results);
+    expect(fc.length).toBe(1);
+    expect(fc[0].name).toBe('list_dir');
+    expect(fc[0].args).toEqual({ DirectoryPath: '.' });
+  });
+
+  it('h4 [补丁2防回归] 误扣正文随 native 收口补发；标记开头的废弃块不泄漏', () => {
+    // ── 场景1：扣留文本以纯文本开头（回归 A 形态的误扣正文）→ 必须随调用帧补发 ──
+    const sid1 = 'reg_patch2_plain_led';
+    const OPEN = '<' + 'tool_call' + '>';
+    const chunks1 = [
+      // 帧1：跨 chunk 切分的标记前缀 '<' + 'tool_' 被 partial holdback 扣留
+      { id: sid1, choices: [{ delta: { content: '前文：' + '<' + 'tool_' }, index: 0 }] },
+      // 帧2：仍在未闭合块内 → 整帧扣留；同帧出现 native tool_calls 并以 tool_calls 收口
+      {
+        id: sid1,
+        choices: [
+          {
+            delta: {
+              content: 'call>{"name":"x"} 后文',
+              tool_calls: [{ index: 0, id: 'p2', function: { name: 'list_dir', arguments: '{"DirectoryPath":"."}' } }],
+            },
+            finish_reason: 'tool_calls',
+            index: 0,
+          },
+        ],
+      },
+    ];
+    const results1 = chunks1.map((c) => mapOpenAIChunkToGemini(c, 'sensenova'));
+    const allText1 = collectTexts(results1);
+    // 修复前（补丁2 缺失）：tool_calls 收口分支 parts=emitParts.slice() 直接 return，
+    // 扣留文本永久丢失。修复后：纯文本开头的扣留随调用帧原样补发。
+    expect(allText1).toContain('前文：');
+    expect(allText1).toContain('后文');
+    const fc1 = collectFcs(results1);
+    expect(fc1.length).toBe(1);
+    expect(fc1[0].name).toBe('list_dir');
+    // 收口后上下文必须释放（RC8 语义保持）
+    expect(shared.activeStreamContexts.size).toBe(0);
+
+    // ── 场景2：扣留文本以调用标记开头（被原生调用取代的废弃块）→ 维持丢弃，不泄漏 ──
+    const sid2 = 'reg_patch2_markup_led';
+    const chunks2 = [
+      { id: sid2, choices: [{ delta: { content: '前文：' + OPEN + '{"name":"x"' }, index: 0 }] },
+      {
+        id: sid2,
+        choices: [
+          {
+            delta: {
+              content: ' 后文',
+              tool_calls: [{ index: 0, id: 'p3', function: { name: 'list_dir', arguments: '{"DirectoryPath":"."}' } }],
+            },
+            finish_reason: 'tool_calls',
+            index: 0,
+          },
+        ],
+      },
+    ];
+    const results2 = chunks2.map((c) => mapOpenAIChunkToGemini(c, 'sensenova'));
+    const allText2 = collectTexts(results2);
+    // 标记开头的扣留是被原生调用取代的废弃调用块：不泄漏标记（与 d2 同语义），
+    // 代价是块内文本不补发（与中间帧路径「解析消费即清空」的既有语义一致）。
+    expect(allText2).toContain('前文：');
+    expect(allText2).not.toContain(OPEN);
+    const fc2 = collectFcs(results2);
+    expect(fc2.length).toBe(1);
+    expect(fc2[0].name).toBe('list_dir');
+    expect(shared.activeStreamContexts.size).toBe(0);
+  });
+
+  it('h5 [补丁2防回归] pendingToolCalls 收口分支（finish=function_call）同样补发误扣正文', () => {
+    const sid = 'reg_patch2_fn_call';
+    const chunks = [
+      // 帧1：跨 chunk 切分的标记前缀被扣留（纯文本开头）
+      { id: sid, choices: [{ delta: { content: '方法一：' + '<' + 'tool_' }, index: 0 }] },
+      // 帧2：未闭合块内整帧扣留；同帧 native 调用，以旧式 function_call 收口
+      {
+        id: sid,
+        choices: [
+          {
+            delta: {
+              content: 'call> 说明正文',
+              tool_calls: [{ index: 0, id: 'p5', function: { name: 'list_dir', arguments: '{"DirectoryPath":"."}' } }],
+            },
+            finish_reason: 'function_call',
+            index: 0,
+          },
+        ],
+      },
+    ];
+    const results = chunks.map((c) => mapOpenAIChunkToGemini(c, 'sensenova'));
+    const allText = collectTexts(results);
+    // 修复前：pendingToolCalls 分支直接 return，误扣正文丢失；修复后随调用帧补发。
+    expect(allText).toContain('方法一：');
+    expect(allText).toContain('说明正文');
+    const fc = collectFcs(results);
+    expect(fc.length).toBe(1);
+    expect(fc[0].name).toBe('list_dir');
+    expect(shared.activeStreamContexts.size).toBe(0);
+  });
+});

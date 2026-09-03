@@ -13,8 +13,8 @@ export interface StreamContext {
   terminalFinishReason?: string;
   /** Trailing partial tool-call marker held back to avoid leaking markup; flushed at stream end if it turns out to be plain text. */
   pendingHeldSuffix?: string;
-  /** Number of chars of accumulatedText already emitted as visible text (emission is strictly prefix-based). */
-  emittedLen?: number;
+  /** Body text withheld by the emitter (inside an in-flight tool block, or a truncated marker remainder). Flushed verbatim at stream end so it is never duplicated or dropped. */
+  withheldText?: string;
 }
 
 export interface StateTimestamps {

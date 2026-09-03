@@ -986,11 +986,10 @@ describe('Antigravity lean bare-tag tool calls', () => {
     expect(fc.length).toBe(0);
     expect(allText).toContain('前言。');
     // The malformed markup is not a valid tool call (no parseable args), so it is
-    // not emitted as a bogus functionCall. Newer emission logic (emittedLen
-    // revival) flushes the held, unparseable markup back as visible text rather
-    // than silently dropping it — the guarantee is that no invalid tool call
-    // reaches the IDE (which would abort the conversation), while the user's
-    // content is preserved.
+    // not emitted as a bogus functionCall. The withheld-text buffer flushes the
+    // held, unparseable markup back as visible text rather than silently dropping
+    // it — the guarantee is that no invalid tool call reaches the IDE (which would
+    // abort the conversation), while the user's content is preserved.
     expect(allText).toContain('<tool_call>'); // 未解析的持有标记被冲刷回文本，不再静默丢弃
   });
 

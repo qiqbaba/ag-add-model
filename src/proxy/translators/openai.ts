@@ -293,6 +293,21 @@ function findEarliestBareMarkerIdx(combined: string, text: string, prevLen: numb
 }
 
 /**
+ * Whether withheld text begins with tool-call markup (a marker truncation
+ * remainder or an in-flight block) rather than plain body text. Used at native
+ * close branches: markup-led withheld text is an abandoned call block (the
+ * native delta.tool_calls call supersedes it) and must not leak as visible
+ * text; plain-led withheld text is body content that was only held back to
+ * prevent mid-stream flicker and must be re-emitted with the closing frame.
+ */
+function withheldStartsWithMarkup(held: string): boolean {
+  for (const marker of TOOL_CALL_START_MARKERS) {
+    if (held.startsWith(marker)) return true;
+  }
+  return false;
+}
+
+/**
  * A bare tool tag only counts as a tool-call start when it sits at a block
  * boundary (start of text or first non-whitespace on its own line) and outside
  * a markdown code fence. An inline `<view_file>` in prose is just text.
@@ -1238,13 +1253,21 @@ export function mapOpenAIChunkToGemini(
   const leanToolNames = getLeanToolNames(stateKeyStr);
   const leanParamSchemas = modelToolSchemas.get(stateKeyStr) ?? null;
   const prevAcc = context.accumulatedText.slice(0, context.accumulatedText.length - text.length);
+  // A stream that has already produced native delta.tool_calls is a native model
+  // (e.g. SenseNova). Bare text-tag detection only makes sense for the text-tag
+  // models, so disable it once native tool_calls have appeared — otherwise a
+  // line-leading bare tag in a native model's body is wrongly treated as a
+  // tool-call start and the rest of its body text gets swallowed.
+  const nativeSeen = Object.keys(context.toolCalls).length > 0;
   const alreadyInsideToolBlock =
-    hasUnclosedToolCallBlock(prevAcc) || hasUnclosedBareToolBlock(prevAcc, leanToolNames);
+    hasUnclosedToolCallBlock(prevAcc) || (!nativeSeen && hasUnclosedBareToolBlock(prevAcc, leanToolNames));
   const emitParts: GeminiPart[] = [];
   if (reasoning) emitParts.push({ text: reasoning, thought: true });
   if (text) {
     if (alreadyInsideToolBlock) {
-      // Entire delta is inside an in-flight tool block: hold it entirely.
+      // Entire delta is inside an in-flight tool block: hold it into the withheld
+      // buffer so it is re-emitted verbatim at stream end (never duplicated or dropped).
+      context.withheldText = (context.withheldText ?? '') + text;
     } else {
       let earliestIdx = -1;
       for (const marker of TOOL_CALL_START_MARKERS) {
@@ -1257,7 +1280,7 @@ export function mapOpenAIChunkToGemini(
       // when they sit at a block boundary & outside a code fence. Match them
       // against the accumulated text so the boundary test sees the whole stream
       // so far (prevAcc + this delta).
-      const bareIdx = findEarliestBareMarkerIdx(context.accumulatedText, text, prevAcc.length, leanToolNames);
+      const bareIdx = nativeSeen ? -1 : findEarliestBareMarkerIdx(context.accumulatedText, text, prevAcc.length, leanToolNames);
       if (bareIdx >= 0 && (earliestIdx === -1 || bareIdx < earliestIdx)) earliestIdx = bareIdx;
 
       let safePrefix = earliestIdx >= 0 ? text.slice(0, earliestIdx) : text;
@@ -1281,14 +1304,16 @@ export function mapOpenAIChunkToGemini(
         if (holdLen > 0) {
           safePrefix = safePrefix.slice(0, safePrefix.length - holdLen);
           context.pendingHeldSuffix = text.slice(text.length - holdLen);
+          context.withheldText = (context.withheldText ?? '') + context.pendingHeldSuffix;
         } else {
           delete context.pendingHeldSuffix;
         }
+      } else {
+        // Truncated at a bare/standard tool-call marker: the remainder after the
+        // marker was never emitted, so buffer it for verbatim re-emission.
+        context.withheldText = (context.withheldText ?? '') + text.slice(earliestIdx);
       }
-      if (safePrefix) {
-        emitParts.push({ text: safePrefix });
-        context.emittedLen = (context.emittedLen ?? 0) + safePrefix.length;
-      }
+      if (safePrefix) emitParts.push({ text: safePrefix });
     }
   }
 
@@ -1326,7 +1351,7 @@ export function mapOpenAIChunkToGemini(
       parts.push({ functionCall: { name: tr.name, args: tr.args as Record<string, unknown>, id: callId } });
     });
     context.accumulatedText = '';
-    context.emittedLen = 0;
+    context.withheldText = '';
     context.hasEmittedToolCall = true;
     // If this frame is terminal (carries a finish_reason), no later frame will
     // reach the hasEmittedToolCall cleanup below, so free the stream context now
@@ -1343,6 +1368,11 @@ export function mapOpenAIChunkToGemini(
     const pendingToolCalls = Object.values(context.toolCalls).filter((tc) => tc.name);
     if (pendingToolCalls.length > 0) {
       const parts: GeminiPart[] = emitParts.slice();
+      // 补丁2（细化）：原生收口的调用来自 delta.tool_calls，与被扣留文本无关。
+      // 纯文本开头的扣留是误扣正文 → 随本帧原样补发，不再丢失（回归 A 收口丢失面）；
+      // 标记开头的扣留是被原生调用取代的废弃调用块 → 维持丢弃，不泄漏为正文（d2 语义）。
+      const held = context.withheldText;
+      if (held && !withheldStartsWithMarkup(held)) parts.unshift({ text: held });
       for (const tc of pendingToolCalls) {
         let args: ToolCallArgs = {};
         try {
@@ -1403,14 +1433,15 @@ export function mapOpenAIChunkToGemini(
         return { content: { parts, role: 'model' }, finishReason: 'STOP', index: 0 };
       }
     }
-    // Flush any held-back partial marker / un-emitted tool-block text that
-    // turned out to be plain text (it was withheld only to prevent markup
-    // leakage, not to be dropped). emittedLen tracks the prefix already emitted
-    // as visible text, so accumulatedText.slice(emittedLen) is exactly the
-    // held/withheld remainder.
-    const unemitted = context.accumulatedText.slice(context.emittedLen ?? 0);
-    if (unemitted) emitParts.push({ text: unemitted });
+    // Flush any withheld body/partial-marker text that turned out to be plain
+    // text (it was withheld only to prevent markup leakage, not to be dropped).
+    // withheldText tracks exactly the un-emitted remainder, so re-emitting it
+    // verbatim can never duplicate already-emitted text (unlike a prefix-length
+    // counter, which mis-aligns once a marker is split across chunk boundaries).
+    const held = context.withheldText;
+    if (held) emitParts.push({ text: held });
     delete context.pendingHeldSuffix;
+    context.withheldText = '';
     activeStreamContexts.delete(streamId);
     return {
       content: { parts: emitParts, role: 'model' },
@@ -1422,6 +1453,9 @@ export function mapOpenAIChunkToGemini(
   // Only emit tool calls when finishReason signals completion (args are fully accumulated)
   if (finishReason === 'tool_calls') {
     const parts: GeminiPart[] = emitParts.slice();
+    // 补丁2（细化）：同上，纯文本开头的扣留随调用帧补发；标记开头的废弃块不泄漏。
+    const held = context.withheldText;
+    if (held && !withheldStartsWithMarkup(held)) parts.unshift({ text: held });
     for (const tc of Object.values(context.toolCalls)) {
       let args: ToolCallArgs = {};
       try {
