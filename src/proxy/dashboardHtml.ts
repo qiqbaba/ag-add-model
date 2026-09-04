@@ -1537,13 +1537,10 @@ export function renderDashboardHtml(): string {
     }
 
     function renderModelRow(m) {
-      const isThinking = m.capabilities && m.capabilities.isThinking;
       const isVision = m.capabilities && m.capabilities.supportsImages;
       const caps = [];
-      if (isThinking) caps.push('<span class="cap-tag active-thinking">🧠 深度思考</span>');
       if (isVision) caps.push('<span class="cap-tag active-vision">🖼️ 视觉/多模态</span>');
       if (m.allowUnauthorized) caps.push('<span class="cap-tag" style="border-color: rgba(245, 158, 11, 0.4); color: #fcd34d;">🔓 SSL Bypass</span>');
-      if (m.encrypted) caps.push('<span class="cap-tag">🔒 safeStorage 已加密</span>');
 
       return \`
         <div class="model-row">

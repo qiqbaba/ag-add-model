@@ -1,4 +1,4 @@
-本方案只对反重力ide测试有效，反重力未测试，效果未知。
+> 本方案仅针对 **Antigravity IDE 独立版**（VS Code Fork，解包式 `resources\app`）测试验证，其他安装形态未测试，效果未知。
 
 项目是在[vahapogut/antigravity-add-model](https://github.com/vahapogut/antigravity-add-model)基础上进行的修改。
 
@@ -6,7 +6,7 @@
 
 > **Antigravity IDE（VS Code Fork）部署方案**
 >
-> 本仓库为 **Antigravity IDE 独立版**（解包式 `resources\app`，VS Code Fork 架构）提供一键部署，可在内置 Gemini 模型之外启用外部 AI 模型（OpenAI、Anthropic、Together API、Ollama、Google AI Studio 以及任何 OpenAI 兼容的提供商）。
+> 本仓库为 **Antigravity IDE 独立版**（解包式 `resources\app`，VS Code Fork 架构）提供一键部署，可在内置 Gemini 模型之外启用外部 AI 模型（OpenAI、Anthropic、Ollama、Google AI Studio 以及任何 OpenAI 兼容的提供商，如 Together API）。
 >
 > 它向 Electron 应用注入一个本地 HTTP 代理，逆向工程 Cloud Code 内部 API（`v1internal`），在各提供商格式之间翻译请求/响应，并通过 `custom_models.json` 配置实现外部模型无缝接入。
 
@@ -378,8 +378,8 @@ Apache License 2.0。详见 [LICENSE](LICENSE)。
 
 ---
 
-## 开发者
+## 原作者
 
-**Abdulvahap OGUT**
+上游项目作者：**Abdulvahap OGUT**
 
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-0077B5?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/abdulvahap-ogut-343992398/)

@@ -14,7 +14,7 @@
   - [2.1 fetchAvailableModels 拦截与注入规范](#21-fetchavailablemodels-拦截与注入规范)
   - [2.2 streamGenerateContent / generateContent 拆包与包装](#22-streamgeneratecontent--generatecontent-拆包与包装)
   - [2.3 流式修复：元数据缓冲 vs 生成直通](#23-流式修复元数据缓冲-vs-生成直通)
-  - [2.4 工具调用（DSML 解析与 tool_use 映射）](#24-工具调用dsml-解析与-tool_use-映射)
+  - [2.4 工具调用（prompt-based 解析与 prompt-XML 交付）](#24-工具调用prompt-based-解析与-prompt-xml-交付)
   - [2.5 运行时状态管理与 TTL 清理](#25-运行时状态管理与-ttl-清理)
   - [2.6 Schema 校验、动态端口与请求重试](#26-schema-校验动态端口与请求重试)
   - [2.7 多模态/视觉（Vision）输入处理](#27-多模态视觉vision-输入处理)
@@ -23,11 +23,7 @@
   - [3.2 一键部署流程（deploy-ide.ps1）](#32-一键部署流程deploy-ideps1)
   - [3.3 custom_models.json 配置规范与加解密](#33-custom_modelsjson-配置规范与加解密)
   - [3.4 可视化配置与连通性测试面板（Web Dashboard & RESTful API）](#34-可视化配置与连通性测试面板web-dashboard--restful-api)
-<<<<<<< HEAD
-- [四、踩坑实录与深度排障（1~13 坑完整收录）](#四踩坑实录与深度排障113-坑完整收录)
-=======
-- [四、踩坑实录与深度排障（1~12 坑完整收录）](#四踩坑实录与深度排障112-坑完整收录)
->>>>>>> a641afc (docs: 扩充踩坑实录至 12 例，收窄 URL 自动补全范围并新增模型提供商支持)
+- [四、踩坑实录与深度排障（1~25 坑完整收录）](#四踩坑实录与深度排障125-坑完整收录)
   - [坑 1：require 静默失败（ESM 主进程）](#坑-1require-静默失败esm-主进程)
   - [坑 2：Content-Length 与 Transfer-Encoding 冲突（Parse Error）](#坑-2content-length-与-transfer-encoding-冲突parse-error)
   - [坑 3：product.json 完整性校验警告](#坑-3productjson-完整性校验警告)
@@ -39,13 +35,19 @@
   - [坑 9：自定义 provider 名称导致协议未转换（HTTP 400 required model）](#坑-9自定义-provider-名称导致协议未转换http-400-required-model)
   - [坑 10：多自定义模型仅显示 N-1 个（同名 slug 覆写）](#坑-10多自定义模型仅显示-n-1-个同名-slug-覆写)
   - [坑 11：Web 面板打不开 / 返回 Google 404（部署副本过期）](#坑-11web-面板打不开--返回-google-404部署副本过期)
-<<<<<<< HEAD
-  - [坑 12：GLM-5.2 / SenseNova 等模型在文本流中输出原始 <tool_call> 标签](#坑-12glm-52--sensenova-等模型在文本流中输出原始-tool_call-标签导致泄漏且工具不执行)
+  - [坑 12：GLM-5.2 / SenseNova 等模型在文本流中输出原始 tool_call 标签导致泄漏且工具不执行](#坑-12glm-52--sensenova-等模型在文本流中输出原始-tool_call-标签导致泄漏且工具不执行)
   - [坑 13：自定义模型回答过程中自动结束（finishReason 与多轮 content 丢弃）](#坑-13自定义模型回答过程中自动结束finishreason-与多轮-content-丢弃)
   - [坑 14：多工具/并行工具调用（Explored N folders）后 ID 错乱导致模型直接停止](#坑-14多工具并行工具调用explored-n-folders后-id-错乱导致模型直接停止)
-=======
-  - [坑 12：自定义模型工具调用「不执行 / 提前结束」——finishReason 回归](#坑-12自定义模型工具调用不执行--提前结束finishreason-回归)
->>>>>>> a641afc (docs: 扩充踩坑实录至 12 例，收窄 URL 自动补全范围并新增模型提供商支持)
+  - [坑 15：toolSummary / toolAction / WaitMsBeforeAsync 被误判为代理私有元数据而剥除](#坑-15toolsummary--toolaction--waitmsbeforeasync-被误判为代理私有元数据而剥除)
+  - [坑 16：跨 chunk 半截标签导致下一块整段泄漏](#坑-16跨-chunk-半截标签导致下一块整段泄漏)
+  - [坑 17：全角竖线 DSML 变体](#坑-17全角竖线-dsml-变体2026-09-04-1125-真实商汤流)
+  - [坑 18：toolSummary/toolAction 乱码（GBK 双重解码）→ 合成替换](#坑-18toolsummarytoolaction-乱码gbk-双重解码-合成替换)
+  - [坑 19：functionCall 帧与 finishReason 同帧被 LS 忽略](#坑-19functioncall-帧与-finishreason-同帧被-ls-忽略)
+  - [坑 20 与坑 23（合并）：thoughtSignature 宁缺勿假](#坑-20-与坑-23合并thoughtsignature-宁缺勿假)
+  - [坑 21：cleanText 误删下一在途块的开标签](#坑-21cleantext-误删下一在途块的开标签)
+  - [坑 22：调用帧 response 级元数据缺失](#坑-22调用帧-response-级元数据缺失)
+  - [坑 24：supportsToolCalls 顶层平铺无效（嵌套消息字段）](#坑-24supportstoolcalls-顶层平铺无效嵌套消息字段)
+  - [坑 25（终极范式）：LS 只解析响应文本中的 prompt-XML 标记，functionCall part 被忽略](#坑-25终极范式ls-对自定义模型只解析响应文本中的-prompt-xml-标记functioncall-part-被忽略)
 - [五、验证清单、日志速查与回滚](#五验证清单日志速查与回滚)
   - [5.1 部署验证清单](#51-部署验证清单)
   - [5.2 关键日志位置速查](#52-关键日志位置速查)
@@ -88,7 +90,7 @@ Antigravity IDE（VS Code Fork）中，语言服务器与云端大模型交互�
 
 ### 1.2 核心模块与文件清单
 
-当前代码库的全部核心功能分布在以下文件中（运行时源文件 17 个 + `src/__tests__/` 测试 10 个 + `src/__mocks__/` mock 1 个，共 28 个 `.ts` 文件）：
+当前代码库的全部核心功能分布在以下文件中（运行时源文件 19 个 + `src/__tests__/` 测试 11 个 + `src/__mocks__/` mock 1 个，共 31 个 `.ts` 文件）：
 
 ```
 antigravity-add-model/
@@ -98,18 +100,20 @@ antigravity-add-model/
 │   ├── cryptoStore.ts             # API 密钥安全存储（基于 Electron safeStorage AES-256-GCM）
 │   ├── schemaValidator.ts         # 运行时 Schema 校验器（模型配置、API 响应、流分块）
 │   ├── types.d.ts                 # 全局 Ambient 类型声明（Electron 与 Node.js 扩展）
-│   ├── __tests__/                 # 单元/回归测试（vitest，共 10 个测试文件）
+│   ├── __tests__/                 # 单元/回归测试（vitest，共 11 个测试文件）
 │   ├── __mocks__/                 # 测试 mock 模块（electron-log 等）
 │   └── proxy/
 │       ├── registry.ts            # 翻译器注册表：自动发现并动态加载 translators/ 模块
 │       ├── shared.ts              # 跨轮次上下文状态管理（Map 隔离 + 托管 TTL 垃圾回收）
 │       ├── modelUtils.ts          # 模型能力集中检测（Thinking、DeepSeek、Claude、Vision 等）
+│       ├── modelDiscovery.ts      # 上游 /models 接口探测与模型列表发现（供面板批量添加）
 │       ├── settingsSync.ts        # 运行时端口 ↔ settings.json / active_port 双向同步（JSONC 安全）
 │       ├── connectionTest.ts      # 连通性探测引擎（RTT 测量、401/403/404/429 诊断）
 │       ├── dashboardHtml.ts       # Web 面板 SPA HTML 模板（约 1700+ 行）
 │       ├── modelConfigManager.ts  # 模型增删改查、safeStorage 加解密、.bak 备份
 │       └── translators/
 │           ├── utils.ts           # 翻译器共享工具（DSML 解析、工具调用映射、参数归一化）
+│           ├── prompt-xml.ts      # prompt-XML 工具调用交付层（坑 25 终极范式单点出口）
 │           ├── openai.ts          # OpenAI ↔ Gemini 双向翻译器（请求、响应、SSE、Tool Calls）
 │           ├── anthropic.ts       # Anthropic ↔ Gemini 双向翻译器（Claude tool_use、Thinking）
 │           ├── google.ts          # Google AI Studio 透传与动态端点路由
@@ -657,7 +661,7 @@ OpenAI 兼容自定义模型（`openai` / `custom` / `openrouter` / `ollama` 等
 
 ---
 
-### 坑 20 → 23：thoughtSignature 宁缺勿假
+### 坑 20 与坑 23（合并）：thoughtSignature 宁缺勿假
 
 * **症状**：伪签名导致整个 part 被丢弃（13:08/13:29 实测复现两次）。
 * **根因**：LS 对缺失签名不校验（官方 claude-sonnet-4-6 BYO 透传帧**没有** thoughtSignature 照样执行）；对**存在**的签名会验签，伪造的 Base64 串解不出合法结构 → part 判非法 → 丢弃。
@@ -709,7 +713,7 @@ OpenAI 兼容自定义模型（`openai` / `custom` / `openrouter` / `ollama` 等
 - [ ] 检查语言服务器启动参数包含 `--cloud_code_endpoint http://127.0.0.1:50999/v1internal/xxxxxxx`；
 - [ ] 代理日志显示 `Loaded custom models count: N`；
 - [ ] IDE 模型下拉菜单中出现自定义模型（带 `extm-*` 前缀）；
-- [ ] 官方 Low/Medium/High 分级子菜单能够正常悬停并展开展开；
+- [ ] 官方 Low/Medium/High 分级子菜单能够正常悬停并展开；
 - [ ] 发送消息可获得流畅的流式 SSE 响应（HTTP 200）。
 - [ ] **工具执行验证（坑 25 终极标准）**：让自定义模型执行一个需调用工具的任务（如读文件/跑命令）。`main.log` 应出现 `Detected N text tool call(s)`，且 IDE 界面弹出工具执行芯片并真实执行（而非回复一句话后提前结束）。若工具不执行：优先 dump `streamGenerateContent` 请求体确认请求形态，再核对响应交付的是 prompt-XML 文本（`<tool_name>{json}</tool_name>`）而非 functionCall part。
 - [ ] 调试开关：建 `~/.gemini/antigravity/raw_stream.flag` 文件可开启 `[Proxy][RAW:*]`（上游原文）/`[Proxy][MAP:*]`（映射结果）流日志；删除即关闭。
