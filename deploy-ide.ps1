@@ -175,9 +175,34 @@ if (Test-Path $wbJs) {
         $wbModified = $true
     }
 
+    # 4. 自定义模型按来源平台合并为二级菜单: IOu 保留推荐排序的全部分组,
+    #    并将在命名分组(平台组)中出现的模型从无名组中剔除以避免重复显示
+    $oldIOu = 'IOu=t=>Re(()=>{let e=t.find(i=>i.name.toLowerCase()==="recommended");return e?{groupName:"Recommended",options:e.groups[0].options||[]}:{groupName:"Recommended",options:[]}},[t])'
+    $newIOu = 'IOu=t=>Re(()=>{let e=t.find(i=>i.name.toLowerCase()==="recommended");if(!e)return[];let dup=new Set;e.groups.forEach(g=>{g.groupName&&(g.options||[]).forEach(o=>dup.add(o.label))});return e.groups.map(g=>({groupName:g.groupName||"",options:(g.options||[]).filter(o=>g.groupName||!dup.has(o.label))})).filter(g=>g.options.length>0)},[t])'
+    if ($wbt.Contains($oldIOu)) {
+        $wbt = $wbt.Replace($oldIOu, $newIOu)
+        $wbModified = $true
+    }
+
+    # 5. AOu 直接返回分组数组 (配合 IOu 的多分组返回值)
+    $oldAOu = 'AOu=(t,e)=>{let i=IOu(e);return Re(()=>[i],[i])}'
+    $newAOu = 'AOu=(t,e)=>{let i=IOu(e);return Re(()=>i,[i])}'
+    if ($wbt.Contains($oldAOu)) {
+        $wbt = $wbt.Replace($oldAOu, $newAOu)
+        $wbModified = $true
+    }
+
+    # 6. LOu 对命名分组渲染为可折叠二级菜单 (SubmenuRoot + 右侧弹出 Content)
+    $oldLOu = 'LOu=({group:t})=>E("div",{className:"flex flex-col gap-px",children:t.options.map(e=>E(kOu,{model:e},e.label))})'
+    $newLOu = 'LOu=({group:t})=>t.groupName?E(bs.SubmenuRoot,{children:[E(bs.SubmenuTrigger,{children:[E("span",{className:"truncate text-xs text-left flex-1",children:t.groupName}),E("span",{className:"text-[10px] opacity-50",children:t.options.length})]}),E(bs.Content,{side:"right",align:"start",className:"min-w-40 p-1",children:E("div",{className:"flex flex-col gap-px",children:t.options.map(e=>E(kOu,{model:e},e.label))})})]}):E("div",{className:"flex flex-col gap-px",children:t.options.map(e=>E(kOu,{model:e},e.label))})'
+    if ($wbt.Contains($oldLOu)) {
+        $wbt = $wbt.Replace($oldLOu, $newLOu)
+        $wbModified = $true
+    }
+
     if ($wbModified) {
         [System.IO.File]::WriteAllText($wbJs, $wbt)
-        Write-Host "   已应用前端模型选择器高度与滚动补丁" -ForegroundColor Green
+        Write-Host "   已应用前端模型选择器补丁 (高度/滚动/宽度/平台分组二级菜单)" -ForegroundColor Green
     } else {
         Write-Host "   前端模型选择器已处于优化状态, 跳过" -ForegroundColor DarkGray
     }

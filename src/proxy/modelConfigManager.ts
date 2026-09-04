@@ -28,6 +28,8 @@ export interface CustomModel {
   _placeholderId?: string;
   timeout?: number;
   maxRetries?: number;
+  /** 可选：模型选择器中的分组名（二级菜单名）。缺省时按 apiUrl 自动推断平台。 */
+  group?: string;
 }
 
 export interface ModelViewModel {
@@ -273,6 +275,7 @@ export function saveCustomModel(modelData: Partial<CustomModel>): {
     supportsThinking: typeof modelData.supportsThinking === 'boolean' ? modelData.supportsThinking : undefined,
     timeout: modelData.timeout ? Number(modelData.timeout) : undefined,
     maxRetries: modelData.maxRetries !== undefined ? Number(modelData.maxRetries) : undefined,
+    group: modelData.group ? modelData.group.trim() : undefined,
   };
 
   const validation = validateCustomModel(model);
@@ -294,6 +297,10 @@ export function saveCustomModel(modelData: Partial<CustomModel>): {
     // If apiKey is empty or preserved mask, retain existing key
     if (!model.apiKey || model.apiKey.includes('••••')) {
       model.apiKey = currentModels[existingIndex].apiKey || '';
+    }
+    // 面板未传 group 时保留原有分组设置
+    if (model.group === undefined) {
+      model.group = currentModels[existingIndex].group;
     }
     currentModels[existingIndex] = model;
   } else {
@@ -380,6 +387,7 @@ export function saveCustomModels(modelList: Partial<CustomModel>[]): {
       supportsThinking: typeof item.supportsThinking === 'boolean' ? item.supportsThinking : undefined,
       timeout: item.timeout ? Number(item.timeout) : undefined,
       maxRetries: item.maxRetries !== undefined ? Number(item.maxRetries) : undefined,
+      group: item.group ? item.group.trim() : undefined,
     };
 
     const validation = validateCustomModel(model);

@@ -32,6 +32,8 @@ export interface CustomModel {
   _placeholderId?: string;
   timeout?: number;
   maxRetries?: number;
+  /** 可选：模型选择器中的分组名（二级菜单名）。缺省时按 apiUrl 自动推断平台。 */
+  group?: string;
 }
 
 interface GeminiRequestBody {
@@ -1794,16 +1796,61 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
             // Keep the natural user-defined configuration order from custom_models.json.
             const customSlugs = customModels.map((m) => m._slug || toSlug(m)).filter(Boolean) as string[];
             if (customSlugs.length > 0 && googleJson.agentModelSorts && Array.isArray(googleJson.agentModelSorts)) {
-              (googleJson.agentModelSorts as { groups?: { modelIds?: string[] }[] }[]).forEach((sort) => {
+              // 按来源平台为自定义模型建立独立分组（配合前端补丁渲染为二级菜单）。
+              // 分组名优先取 custom_models.json 中的 group 字段，否则按 apiUrl 推断。
+              const resolveGroupName = (m: (typeof customModels)[number]): string => {
+                if (m.group && m.group.trim()) return m.group.trim();
+                const url = m.apiUrl || '';
+                const known: [RegExp, string][] = [
+                  [/sensenova/i, '商汤 SenseNova'],
+                  [/api\.b\.ai/i, 'B.AI'],
+                  [/deepseek/i, 'DeepSeek'],
+                  [/moonshot|kimi/i, 'Moonshot AI'],
+                  [/bigmodel|zhipu/i, '智谱 BigModel'],
+                  [/dashscope|aliyun/i, '阿里百炼'],
+                  [/openrouter/i, 'OpenRouter'],
+                  [/siliconflow/i, '硅基流动'],
+                  [/localhost|127\.0\.0\.1|ollama/i, '本地模型'],
+                ];
+                for (const [re, name] of known) {
+                  if (re.test(url)) return name;
+                }
+                try {
+                  return new URL(url).hostname || '自定义模型';
+                } catch {
+                  return '自定义模型';
+                }
+              };
+              const groupedSlugs = new Map<string, string[]>();
+              customModels.forEach((m) => {
+                const slug = m._slug || toSlug(m);
+                if (!slug) return;
+                const g = resolveGroupName(m);
+                if (!groupedSlugs.has(g)) groupedSlugs.set(g, []);
+                groupedSlugs.get(g)!.push(slug);
+              });
+              (googleJson.agentModelSorts as { groups?: { displayName?: string; modelIds?: string[] }[] }[]).forEach((sort) => {
                 if (sort.groups && Array.isArray(sort.groups) && sort.groups.length > 0) {
+                  // 幂等：移除早前注入到 groups[0] 的自定义 slug 与自定义平台分组
+                  sort.groups = sort.groups.filter((g, idx) => {
+                    if (idx === 0) return true;
+                    const ids = g && Array.isArray(g.modelIds) ? g.modelIds : [];
+                    return !(ids.length > 0 && ids.every((id) => customSlugs.includes(id)));
+                  });
                   const g0 = sort.groups[0];
                   if (Array.isArray(g0.modelIds)) {
+                    // groups[0] 保留自定义模型：前端补丁未生效时仍按旧版扁平列表展示
+                    g0.modelIds = g0.modelIds.filter((id) => !customSlugs.includes(id));
                     customSlugs.forEach((slug) => {
                       if (!g0.modelIds!.includes(slug)) {
                         g0.modelIds!.push(slug);
                       }
                     });
                   }
+                  // 追加平台分组（v1internal.ModelGroup: display_name + model_ids）
+                  groupedSlugs.forEach((ids, name) => {
+                    sort.groups!.push({ displayName: name, modelIds: ids });
+                  });
                 }
               });
             }

@@ -260,6 +260,77 @@ describe('multi-model agentModelSorts merge logic', () => {
     expect(g0ModelIds[15]).toBe('custom-custom-model-15');
   });
 
+  it('appends per-platform custom groups and keeps groups[0] as flat fallback', () => {
+    // 与 src/proxy.ts 中 agentModelSorts 注入逻辑保持一致的回归规格：
+    // 1) groups[0] 仍保留全部自定义 slug（前端未打补丁时扁平展示）
+    // 2) 额外追加按平台命名的分组（v1internal.ModelGroup: displayName + modelIds）
+    // 3) 重复执行幂等：旧的自定义平台分组与 groups[0] 中的自定义 slug 会先被清除
+    const customModels = [
+      { name: 'models/deepseek-v4-pro', displayName: 'Deepseek V4 Pro', apiUrl: 'https://token.sensenova.cn/v1/chat/completions', _slug: 'extm-deepseek-v4-pro' },
+      { name: 'models/kimi-k3', displayName: 'Kimi K3', apiUrl: 'https://token.sensenova.cn/v1/chat/completions', _slug: 'extm-kimi-k3' },
+      { name: 'models/hy3', displayName: 'Hy3', apiUrl: 'https://api.b.ai/v1/chat/completions', _slug: 'extm-hy3' },
+      { name: 'models/my-local', displayName: 'My Local', apiUrl: '', group: '我的分组', _slug: 'extm-my-local' },
+    ];
+
+    const googleJson = {
+      agentModelSorts: [
+        {
+          displayName: 'Recommended',
+          groups: [
+            { modelIds: ['gemini-3.7-flash-high', 'extm-deepseek-v4-pro'] },
+            { displayName: '商汤 SenseNova', modelIds: ['extm-deepseek-v4-pro', 'extm-kimi-k3'] }, // 旧注入, 应被清除重建
+          ],
+        },
+      ],
+    };
+
+    const customSlugs = customModels.map((m) => m._slug).filter(Boolean) as string[];
+    const resolveGroupName = (m: (typeof customModels)[number]): string => {
+      if (m.group && m.group.trim()) return m.group.trim();
+      const url = m.apiUrl || '';
+      const known: [RegExp, string][] = [
+        [/sensenova/i, '商汤 SenseNova'],
+        [/api\.b\.ai/i, 'B.AI'],
+      ];
+      for (const [re, name] of known) {
+        if (re.test(url)) return name;
+      }
+      return '自定义模型';
+    };
+    const groupedSlugs = new Map<string, string[]>();
+    customModels.forEach((m) => {
+      const g = resolveGroupName(m);
+      if (!groupedSlugs.has(g)) groupedSlugs.set(g, []);
+      groupedSlugs.get(g)!.push(m._slug);
+    });
+    googleJson.agentModelSorts.forEach((sort) => {
+      sort.groups = sort.groups.filter((g, idx) => {
+        if (idx === 0) return true;
+        const ids = g.modelIds || [];
+        return !(ids.length > 0 && ids.every((id) => customSlugs.includes(id)));
+      });
+      const g0 = sort.groups[0];
+      g0.modelIds = g0.modelIds.filter((id) => !customSlugs.includes(id));
+      customSlugs.forEach((slug) => g0.modelIds.push(slug));
+      groupedSlugs.forEach((ids, name) => {
+        sort.groups.push({ displayName: name, modelIds: ids });
+      });
+    });
+
+    const groups = googleJson.agentModelSorts[0].groups;
+    expect(groups.length).toBe(4); // g0 + 商汤 + B.AI + 我的分组
+    expect(groups[0].modelIds).toEqual([
+      'gemini-3.7-flash-high',
+      'extm-deepseek-v4-pro',
+      'extm-kimi-k3',
+      'extm-hy3',
+      'extm-my-local',
+    ]);
+    expect(groups[1]).toEqual({ displayName: '商汤 SenseNova', modelIds: ['extm-deepseek-v4-pro', 'extm-kimi-k3'] });
+    expect(groups[2]).toEqual({ displayName: 'B.AI', modelIds: ['extm-hy3'] });
+    expect(groups[3]).toEqual({ displayName: '我的分组', modelIds: ['extm-my-local'] });
+  });
+
   it('generates distinct slugs for models sharing the same externalModelName but different displayName', () => {
     function toSlugUpdated(model: {
       displayName?: string;
