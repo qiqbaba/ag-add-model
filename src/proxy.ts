@@ -332,7 +332,8 @@ function decompressResponseBody(
 
 function proxyToGoogle(req: http.IncomingMessage, res: http.ServerResponse, reqBody: Buffer): void {
   const isCloudCodeUrl = req.url!.includes('v1internal') || req.url!.includes('daily-cloudcode');
-  // TEMP-DEBUG（坑25续）：dump 轨迹上报——LS 视角步骤/工具调用记录的唯一可靠证据源。
+  // 调试（raw_stream.flag 开启时生效）：dump LS 轨迹上报——LS 视角步骤/工具
+  // 调用记录的唯一可靠证据源，排查"工具是否被 LS 接受执行"的金线。
   if (rawStreamEnabled() && req.url!.includes('recordTrajectoryAnalytics')) {
     try {
       const fsMod = require('node:fs') as typeof import('node:fs');
@@ -2015,8 +2016,9 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
             log.info(
               `[Proxy] Intercepting Cloud Code generation for custom model: ${modelName} => ${matchedCustomModel.displayName}`,
             );
-            // TEMP-DEBUG（坑25续）：dump 自定义模型完整请求体（tools/systemInstruction/
-            // customModelInfoOverride 等能力字段），定位 functionCall 忽略判定来源。
+            // 调试（raw_stream.flag 开启时生效）：dump 自定义模型完整请求体
+            // （tools 字段有无、systemInstruction 工具定义段）——坑25 定位
+            // prompt-based 范式的关键证据，排障时开 flag 复现。
             if (rawStreamEnabled()) {
               try {
                 const fsMod = require('node:fs') as typeof import('node:fs');

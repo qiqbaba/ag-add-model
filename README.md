@@ -15,7 +15,7 @@
 | 文档 | 适用对象 | 内容 |
 |---|---|---|
 | **本 README** | 使用者 | 安装、配置、参数说明、安全机制、常见故障排查 |
-| [ARCHITECTURE.md](./ARCHITECTURE.md) | 维护者 / 部署者 | **全景技术指南**：系统架构设计、内部 API 逆向规范、自动化部署、**12 个已踩坑与修复**、验证清单与回滚 |
+| [ARCHITECTURE.md](./ARCHITECTURE.md) | 维护者 / 部署者 | **全景技术指南**：系统架构设计、内部 API 逆向规范、自动化部署、**25 个已踩坑与修复（含工具调用 prompt-XML 终极范式）**、验证清单与回滚 |
 
 ---
 
@@ -44,7 +44,7 @@
 9. 初始化 `custom_models.json` 并启动 IDE 与健康检查
 
 > [!TIP]
-> IDE 采用解包式 `resources\app\` 布局（无 `app.asar`）。语言服务器的云端端点由 **`jetski.cloudCodeUrl`** 用户设置驱动，它会覆盖二进制内的硬编码 URL — 因此写入该设置是关键步骤。完整技术实现与 12 个已知坑见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
+> IDE 采用解包式 `resources\app\` 布局（无 `app.asar`）。语言服务器的云端端点由 **`jetski.cloudCodeUrl`** 用户设置驱动，它会覆盖二进制内的硬编码 URL — 因此写入该设置是关键步骤。完整技术实现与 25 个已知坑见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
 
 ### 一键开启 / 暂停代理（日常便捷切换）
 
@@ -344,6 +344,17 @@ Antigravity IDE 自动更新会覆盖已注入的文件（`out\main.js`、`out\p
 1. 降低请求频率
 2. 调大模型配置中的 `maxRetries`
 3. 查看你的 API 提供商限流面板
+
+### 模型回复一句话后提前结束 / 工具不执行
+这是自定义模型接入的**头号问题**（本项目坑 12~25，终极根因为坑 25）。排查顺序：
+
+1. **确认部署版本**：`dist/proxy.js` 构建时间 vs `resources\app\out\proxy\proxy.js`（重跑 `deploy-ide.ps1` 后必须**完全重启 IDE**——语言服务器只在启动时连接代理）；
+2. **看代理日志**：`%APPDATA%\Antigravity IDE\logs\main.log` 搜 `Detected N text tool call(s)`——有即解析成功，问题在交付层；无则检查 `modelToolNames` 注册（请求 systemInstruction 里工具定义段是否被正确提取）；
+3. **核对交付形态**（坑 25 终极范式）：LS 对自定义模型只解析响应**文本**中的 `<tool_name>{json}</tool_name>` 块，functionCall part 会被忽略。交付层由 `buildFunctionCallParts` 单点出口统一走 prompt-XML 文本（`src/proxy/translators/prompt-xml.ts`）；
+4. **开启流日志**：建 `~/.gemini/antigravity/raw_stream.flag` 文件后重启，`[Proxy][RAW:*]` 显示上游原文、`[Proxy][MAP:*]` 显示映射结果，逐帧对照定位；
+5. 若工具芯片弹出但参数异常（乱码/缺字段）：见坑 15/18（toolSummary/toolAction 必填合成与乱码替换）。
+
+> 完整 25 坑排查实录见 [ARCHITECTURE.md](./ARCHITECTURE.md) 第四章。
 
 > 更多深层排障（如 LS 崩溃、协议 400、登录卡死等）见 [ARCHITECTURE.md](./ARCHITECTURE.md) 的“踩坑实录与深度排障”与“关键日志位置速查”。
 

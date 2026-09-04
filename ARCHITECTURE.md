@@ -1,6 +1,6 @@
 # Antigravity 自定义模型启用器 · 架构设计与部署全景指南
 
-> 本文是 **Antigravity IDE 独立版**（VS Code Fork 架构，解包式 `resources\app`）的核心技术文档，完整整合了**系统架构设计**、**Cloud Code 内部 API 逆向工程**、**自动化部署实现**、**12 个深坑排查实录**、**验证清单与回滚手册**。
+> 本文是 **Antigravity IDE 独立版**（VS Code Fork 架构，解包式 `resources\app`）的核心技术文档，完整整合了**系统架构设计**、**Cloud Code 内部 API 逆向工程**、**自动化部署实现**、**25 个深坑排查实录（含坑 25：prompt-based 工具调用终极范式）**、**验证清单与回滚手册**。
 
 ---
 
@@ -167,6 +167,7 @@ Antigravity 使用 Google 专有的 **Cloud Code 内部 API**（`v1internal:*` �
 | `tagTitle` | `string` | `'Custom'` |
 | `tagDescription` | `string` | `'User-configured model'` |
 | `modelExperiments` | `object` | `{ experiments: {} }` |
+| `modelFeatures` | `object` | **嵌套 ModelFeatures 消息**（27 字段，见下方说明；缺失时 LS 视模型为无工具能力） |
 | `thinkingLevel` | `number (int32)` | **`0`**（`THINKING_LEVEL_UNSPECIFIED`，**切勿传字符串！**） |
 | `thinkingBudget` | `number` | 思考模型填 `4096`，普通模型填 `0` |
 | `minThinkingBudget` | `number` | 思考模型填 `1024`，普通模型填 `0` |
@@ -175,6 +176,19 @@ Antigravity 使用 Google 专有的 **Cloud Code 内部 API**（`v1internal:*` �
 | `modelProvider` | `string` | `'MODEL_PROVIDER_GOOGLE'` |
 | `toolFormatterType` | `string` | `'TOOL_FORMATTER_TYPE_XML'` |
 | `tokenizerType` | `string` | `'LLAMA_WITH_SPECIAL'` |
+
+**`modelFeatures` 嵌套结构（坑 24）**：`supportsToolCalls` 必须挂在 `entry.modelFeatures.supportsToolCalls`（嵌套消息字段），**顶层平铺无效**——proto 描述符中 `ModelInfo.model_features` 是独立嵌套消息（field 12 附近），Go LS 按 protojson 嵌套路径取值。注入最小集：
+```json
+"modelFeatures": {
+  "zeroShotCapable": true,
+  "supportsImages": false,
+  "supportsToolCalls": true,
+  "supportsThinking": true,
+  "supportsStreaming": true,
+  "supportsMultimodal": false
+}
+```
+注意：`supportsToolCalls` 只影响 IDE 的 UI 能力展示与请求路由，**不改变 LS 的工具调用解析范式**——对自定义模型 LS 始终走 prompt-based 工具调用（见 [2.4 节](#24-工具调用prompt-based-解析与-prompt-xml-交付)与 [坑 25](#坑-25终极范式ls-对自定义模型只解析响应文本中的-prompt-xml-标记functioncall-part-被忽略)）。
 
 #### 3. 分组注入规则
 * **必须追加到 `agentModelSorts[0].groups[0].modelIds` 末尾**：前端只渲染第一个 Recommended 分组中的模型，独立分组会被前端忽略（详见 [坑 6](#坑-6前端仅渲染-agentmodelsorts-第一个分组)）。
@@ -231,7 +245,28 @@ Antigravity 使用 Google 专有的 **Cloud Code 内部 API**（`v1internal:*` �
 
 ---
 
-### 2.4 工具调用（DSML 解析与 tool_use 映射）
+### 2.4 工具调用（prompt-based 解析与 prompt-XML 交付）
+
+#### 0. 核心范式：LS 对自定义模型走 prompt-based 工具调用（坑 25，2026-09-04 终局结论）
+
+**这是整个项目最关键的机制认知**，此前十余轮修复失败均因对该范式认知错误。实测抓包（`streamGenerateContent` 请求体 dump）证实：
+
+1. **LS 发给自定义模型的请求没有 `tools` 字段**。工具定义以如下形式写在 systemInstruction 文本里（90KB system prompt）：
+   ```
+   10. run_command:
+   <run_command>
+   {"$schema":"...","properties":{...},"required":[...]}
+   </run_command>
+   ```
+2. system prompt 明文指示模型：
+   > "Formulate your tool calls using the xml and json format specified for each tool. **The tool name should be the xml tag surrounding the tool call. The tool arguments should be in a valid json inside of it.**" 且 "ALL tool calls at the END of your message."
+3. 因此 **LS 在响应侧只解析模型输出【文本】中的 `<tool_name>{json}</tool_name>` 块**——对占位模型（`MODEL_PLACEHOLDER_Mxxx`）的 functionCall part **一律忽略**。
+
+**推论（代理的正确职责）**：
+- **解析**：上游模型的文本标记（DSML/`<tool_call>`/裸标签/lean 体等）→ 归一化、参数校验、metadata 合成；
+- **交付**：序列化回 LS 期待的标准 prompt-XML 文本块 `<name>\n{json}\n</name>`（`src/proxy/translators/prompt-xml.ts` 的 `serializeToolCallsAsPromptXml`），作为**普通 text part** 输出——**绝不交付 functionCall part**；
+- **工具名/参数表注册**：请求无 `tools` 字段时，从 systemInstruction 文本中提取 `name:\n<name>\n{...schema...}` 定义段（平衡花括号扫 JSON），注册到 `modelToolNames` / `modelToolSchemas`，保证响应侧解析器有完整名称表；
+- **反向链路**：无原生 `tool_calls` 历史时，`functionResponse` 转为 **user 文本**（`[Tool result for <name>]\n{...}`）回传上游——与 prompt 约定"After each tool use, the user will respond with the result of that tool use"一致；仅当会话历史中确有 assistant `tool_calls` 时才走 tool role 通道。
 
 #### 1. DeepSeek DSML 标签解析
 针对 DeepSeek 等模型在输出中以自定义 XML 形式返回工具调用的情况：
@@ -240,9 +275,9 @@ Antigravity 使用 Google 专有的 **Cloud Code 内部 API**（`v1internal:*` �
   <DSML|parameter name="query" string="true">latest AI news</DSML|parameter>
 </DSML|invoke>
 ```
-[`src/proxy/translators/utils.ts`](file:///d:/programme/antigravity-add-model/src/proxy/translators/utils.ts) 自动捕获该模式，将其转换为 Gemini 标准的 `functionCall` 对象，并从文本流中剔除原始 XML 标记。
+解析器（`parseDSMLToolCalls`，多 Pass 扫描）捕获该模式，归一化后以 prompt-XML 文本块交付，并从文本流中剔除原始 XML 标记（防泄漏）。
 
-**演进变体**：部分宿主（如商汤 SenseNova 的 `deepseek-v4-flash`）把同一结构包进容器，改用 `<DSML|tool_calls> ... <DSML|tool_call name="..."> ... </DSML|tool_call> ... </DSML|tool_calls>`。解析器（`parseDSMLToolCalls`）对 `<DSML|invoke>` 与 `<DSML|tool_call>` 两种条目标签统一匹配（均以 `name` 属性和 `<DSML|parameter>` 子元素为准），并在流式阶段对**未闭合**的 DSML 块先「hold」住其原始标记，块闭合后才发射 `functionCall`，避免 `DSML | tool_calls` 等原始标签以文本形式泄漏到界面。对应回归用例见 `src/__tests__/openai.test.ts` 的 `mapOpenAIToGemini DSML tool_call wrapper`。**
+**演进变体**：部分宿主（如商汤 SenseNova 的 `deepseek-v4-flash`）把同一结构包进容器，改用 `<DSML|tool_calls> ... <DSML|tool_call name="..."> ... </DSML|tool_call> ... </DSML|tool_calls>`；还会随机把 `|` 输出为全角 `｜`（坑 17）。解析器统一匹配，流式阶段对未闭合块 hold 住原始标记，块闭合后统一交付。对应回归用例见 `src/__tests__/openai.regression.test.ts` 的 g6/g6b。
 
 #### 2. 原生工具调用转换与参数归一化
 * **OpenAI** `tool_calls` 与 **Anthropic** `tool_use` 会双向映射为 Gemini 的 `functionCall` / `functionResponse`。
@@ -252,11 +287,11 @@ Antigravity 使用 Google 专有的 **Cloud Code 内部 API**（`v1internal:*` �
 
 OpenAI 兼容自定义模型（`openai` / `custom` / `openrouter` / `ollama` 等）的响应内容由 `mapOpenAIToGemini`（非流式）与 `mapOpenAIChunkToGemini`（流式）翻译为 Gemini `candidates[].content.parts`。为保证工具调用能正确往返、且不丢失任何内容，翻译器遵循以下规则：
 
-1. **DSML 标签触发的工具调用也注册往返映射**。DSML（DeepSeek 式 `<DSML|invoke ...>`）解析出的 `functionCall` 与原生 `tool_calls` 分支一样，会分配 `id`、写入 `modelToolCallIds`、注册 `translatedToolCalls`，并对翻译改名后的参数二次 `normalizeToolArgs(tr.name, tr.args)`。缺失这些注册会让后续 `functionResponse` 无法反查回原始工具名，导致 `formatTranslatedResponse` 无法把本地文件工具结果还原成 CLI 输出。
-2. **`reasoning_content` / `reasoning` 与工具调用共存**。即使响应同时包含思考链与 `tool_calls`（或 DSML），翻译器也会把 `reasoning_content` 作为 `thought: true` 的 part 置于 `functionCall` 之前，而非整段丢弃。
+1. **所有工具调用统一走 prompt-XML 文本交付（坑 25）**。解析出的调用（含 native `tool_calls`）全部经 `buildFunctionCallParts` 单点出口：翻译改名（`translateToolCallToNative`）→ 注册会话状态（`modelToolCallIds`/`translatedToolCalls`，供历史往返与参数回译）→ `serializeToolCallsAsPromptXml` 序列化为 `<name>\n{json}\n</name>` 文本 part。toolSummary/toolAction 为 LS schema 必填参数，交付前由 `sanitizeToolMetadata` 保证存在且合法。
+2. **`reasoning_content` / `reasoning` 与工具调用共存**。即使响应同时包含思考链与 `tool_calls`（或 DSML），翻译器也会把 `reasoning_content` 作为 `thought: true` 的 part 置于正文之前，而非整段丢弃。
 3. **流式分块中 reasoning 与 content 同 chunk 不互斥**。流式 `delta` 若同时携带 `reasoning_content` 与 `content`，两者分别以 `thought` part 与普通 `text` part 一并输出，避免因提前 `return` 丢失正文。流式结束（`stop` / `length` / `tool_calls`）时会统一补齐未清空的累积文本与待发射的 reasoning。
 
-对应回归用例见 `src/__tests__/openai.test.ts`（`should register DSML tool calls for response round-trip`、`should preserve reasoning_content alongside tool_calls`、`should keep content when reasoning and content arrive in the same chunk`）。
+对应回归用例见 `src/__tests__/openai.test.ts` 与 `src/__tests__/openai.regression.test.ts`（g6/g6b 全角 DSML、g7a-d metadata 合成、g8 同帧双块、k1-k3 多调用、j1 半截标签重拼等 50 项回归）。
 
 ---
 
@@ -433,7 +468,7 @@ OpenAI 兼容自定义模型（`openai` / `custom` / `openrouter` / `ollama` 等
 
 ---
 
-## 四、踩坑实录与深度排障（1~12 坑完整收录）
+## 四、踩坑实录与深度排障（1~25 坑完整收录）
 
 ### 坑 1：`require` 静默失败（ESM 主进程）
 * **症状**：主进程代码注入后无任何效果，代理未启动，控制台无报错。
@@ -585,6 +620,86 @@ OpenAI 兼容自定义模型（`openai` / `custom` / `openrouter` / `ollama` 等
 
 ---
 
+### 坑 15：toolSummary / toolAction / WaitMsBeforeAsync 被误判为"代理私有元数据"而剥除
+
+* **症状**：functionCall 帧到达 LS 但工具不执行，会话库无调用记录，随后回退内置模型。LS 报错串：`missing or invalid toolSummary in arguments`。
+* **根因**：这三个键**不是代理私有元数据，而是 IDE 工具 schema 的必填参数**（官方 Gemini 帧的 args 始终携带）。此前在解析层剥除导致 args 缺 required 字段，LS 直接丢弃整个调用。
+* **修复**：`sanitizeToolMetadata` 在全部交付路径保证两键存在且值合法（缺失或含乱码特征时按官方风格合成英文短描述）；`run_command` 缺 `WaitMsBeforeAsync` 时补 `5000`（官方帧观察值）。
+
+---
+
+### 坑 16：跨 chunk 半截标签导致下一块整段泄漏
+
+* **症状**（真实 10:52 流）：上游把标签拆成 `<` + `run_command>` 跨 chunk 发送，块解析消费后 cleanText 尾部残留孤立 `<`，下一帧 `run_command>` 拼不回开标签 → 整块参数作为正文泄漏且第二个调用丢失。
+* **修复**：半截标签尾从 accumulatedText 移入 `pendingHeldSuffix`（打 `heldSuffixDetached` 标记），下一帧重拼前先补回，走既有 heldSuffix 通道。
+
+---
+
+### 坑 17：全角竖线 DSML 变体（2026-09-04 11:25 真实商汤流）
+
+* **症状**：上游随机把 `<|DSML|...>` 输出为 `<｜DSML｜...>`（U+FF5C 全角竖线），结构变为 `<｜DSML|tool name="X">` + `</｜DSML｜invoke>` 闭、外层多余 `</｜DSML｜tool_call>`。整段泄漏为正文、0 个工具调用。
+* **修复**：流式帧文本入口即归一化（`normalizeDSMLPipes`：全角 `｜` → ASCII `|`），保证 accumulatedText、holdback、块解析整条链路只处理 ASCII 形态。
+
+---
+
+### 坑 18：toolSummary/toolAction 乱码（GBK 双重解码）→ 合成替换
+
+* **症状**（11:31 真实流）：商汤服务端对参数区中文做 GBK 双重编码（`查看` → `鏌ョ湅`，甚至含 U+FFFD 截断符），LS 判 `invalid` 丢弃整个调用。
+* **修复**：`METADATA_MOJIBAKE_RE` 检测假名/全角拉丁/U+FFFD/GBK 双重解码高频字特征，命中即合成替换；干净中文值保留不误杀。
+
+---
+
+### 坑 19：functionCall 帧与 finishReason 同帧被 LS 忽略
+
+* **症状**：代理按官方信封包装调用帧（含 finishReason: STOP），LS 视为终帧并把其中的调用丢弃（stopReason=STOP_PATTERN 遗留路径）。
+* **根因**：官方流中**调用帧 candidate 只含 content（无 finishReason、无 index）**，终止由独立的空文本 STOP 帧（`parts:[{text:""}]`）下发。
+* **修复**：拆帧交付——调用帧（仅 content）+ 独立 STOP 收口帧。注意：坑 25 落地后交付为纯文本，此拆帧逻辑不再触发（保留无害）。
+
+---
+
+### 坑 20 → 23：thoughtSignature 宁缺勿假
+
+* **症状**：伪签名导致整个 part 被丢弃（13:08/13:29 实测复现两次）。
+* **根因**：LS 对缺失签名不校验（官方 claude-sonnet-4-6 BYO 透传帧**没有** thoughtSignature 照样执行）；对**存在**的签名会验签，伪造的 Base64 串解不出合法结构 → part 判非法 → 丢弃。
+* **结论**：`SYNTHETIC_THOUGHT_SIGNATURE` / `withThoughtSignature` 彻底移除。**签名宁缺勿假**。
+
+---
+
+### 坑 21：cleanText 误删下一在途块的开标签
+
+* **症状**（12:51 截图）：`</view_file>\n\n<run_command>\n` 同帧到达，cleanText 的裸标签正则把未闭合的 `<run_command>` 删掉 → 整个下一块作为正文泄漏。
+* **修复**：只删除**闭合**的裸标签对 `<(?:names)>[\s\S]*?</(?:names)>` 与孤立的闭标签残余；未闭合开标签必须保留（它是后续 alreadyInsideToolBlock / bare 边界检测的依据）。
+
+---
+
+### 坑 22：调用帧 response 级元数据缺失
+
+* **修复**：对照官方 claude-sonnet-4-6 BYO 透传帧逐字段补齐——`usageMetadata`（从上游 SSE usage 尾帧取真实 token 数）、`modelVersion`、`responseId`；`traceId` 用非空会话派生值。
+
+---
+
+### 坑 24：supportsToolCalls 顶层平铺无效（嵌套消息字段）
+
+* **症状**：注入条目加 `supportsToolCalls: true` 顶层字段无效，LS 仍无工具能力。
+* **根因**：proto 描述符中 `ModelInfo.model_features` 是独立嵌套消息；Go LS 按 protojson 嵌套路径取值，顶层平铺读不到。
+* **修复**：注入完整嵌套 `modelFeatures` 对象（27 字段，最小集见 [2.1 节](#21-fetchavailablemodels-拦截与注入规范)）。**注意**：该字段只影响 IDE UI 能力展示与请求路由，**不是**工具调用解析的开关——真正的解析范式见坑 25。
+
+---
+
+### 坑 25（终极范式）：LS 对自定义模型只解析响应文本中的 prompt-XML 标记，functionCall part 被忽略
+
+* **症状**（历时最久）：自定义模型输出 thinking + 一句话后提前结束，工具从不执行。此前 13 轮修复（拆帧/伪签名移除/元数据补齐/traceId/modelFeatures 嵌套注入……）全部无效。
+* **根因**（请求体 dump 铁证）：LS 发给自定义模型的请求**没有 `tools` 字段**——工具定义全部写在 systemInstruction 文本里（prompt-based tool calling），且明文指示模型"工具名是包裹调用的 XML 标签、参数是其中的合法 JSON"。LS 在响应侧**只解析文本**中的 `<tool_name>{json}</tool_name>` 块，对占位模型的 functionCall part 一律忽略。代理把模型输出的文本标记消费掉、重建成 functionCall part 交付，恰好消灭了 LS 唯一会解析的东西。
+* **修复**（范式级，2026-09-04 终局）：
+  1. 新增 [`src/proxy/translators/prompt-xml.ts`](file:///d:/programme/antigravity-add-model/src/proxy/translators/prompt-xml.ts)：`serializeToolCallsAsPromptXml` 把解析出的调用序列化回标准 `<name>\n{json}\n</name>` 文本；
+  2. `buildFunctionCallParts` 改为单点出口：翻译改名 → 注册会话状态 → 文本交付（流式 5 条路径 + 非流式 2 条路径全部收敛）；
+  3. 请求无 tools 字段时从 systemInstruction 提取 `name:\n<name>\n{schema}` 定义段（平衡花括号扫 JSON），注册 `modelToolNames`/`modelToolSchemas`；
+  4. 反向链路：无原生 tool_calls 历史时 functionResponse 转 user 文本（匹配 prompt 约定）。
+* **验证**：商汤 V4 Flash 发 `gc`（Git 自动提交技能）→ view_file + run_command 工具芯片弹出并真实执行，完整流程跑通；286/286 测试通过。
+* **教训**：**排查第三方宿主行为时，优先抓真实请求体/响应体做对照，而不是反复试探响应格式**——本次靠恢复请求体 dump 一步定位。
+
+---
+
 ## 五、验证清单、日志速查与回滚
 
 ### 5.1 部署验证清单
@@ -596,6 +711,8 @@ OpenAI 兼容自定义模型（`openai` / `custom` / `openrouter` / `ollama` 等
 - [ ] IDE 模型下拉菜单中出现自定义模型（带 `extm-*` 前缀）；
 - [ ] 官方 Low/Medium/High 分级子菜单能够正常悬停并展开展开；
 - [ ] 发送消息可获得流畅的流式 SSE 响应（HTTP 200）。
+- [ ] **工具执行验证（坑 25 终极标准）**：让自定义模型执行一个需调用工具的任务（如读文件/跑命令）。`main.log` 应出现 `Detected N text tool call(s)`，且 IDE 界面弹出工具执行芯片并真实执行（而非回复一句话后提前结束）。若工具不执行：优先 dump `streamGenerateContent` 请求体确认请求形态，再核对响应交付的是 prompt-XML 文本（`<tool_name>{json}</tool_name>`）而非 functionCall part。
+- [ ] 调试开关：建 `~/.gemini/antigravity/raw_stream.flag` 文件可开启 `[Proxy][RAW:*]`（上游原文）/`[Proxy][MAP:*]`（映射结果）流日志；删除即关闭。
 
 ---
 
