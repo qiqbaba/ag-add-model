@@ -17,6 +17,20 @@ beforeEach(() => {
   shared.stateTimestamps.translatedCalls.clear();
 });
 
+/**
+ * 坑 25：交付层已从 functionCall part 切换为 prompt-XML 文本 part。
+ * 从候选的全部文本 part 中拼出 prompt-XML 串（thought part 排除）。
+ */
+function xmlOf(result: { content: { parts: Array<{ text?: string; thought?: boolean; functionCall?: unknown }> } } | null): string {
+  if (!result) return '';
+  return (result.content.parts.filter((p) => p.text && !p.thought).map((p) => p.text!) || []).join('');
+}
+/** 旧断言辅助：等价于 fcParts.length（文本交付下检查 xml 是否含对应块） */
+function expectXmlCall(xml: string, name: string): void {
+  expect(xml).toContain(`<${name}>`);
+  expect(xml).toContain(`</${name}>`);
+}
+
 // ─── mapGeminiToOpenAI ─────────────────────────────────────────────────────
 
 describe('mapGeminiToOpenAI', () => {
@@ -88,7 +102,7 @@ describe('mapGeminiToOpenAI', () => {
     expect(result.messages[0].tool_calls![0].function.name).toBe('list_dir');
   });
 
-  it('should handle functionResponse parts as tool messages', () => {
+  it('should handle functionResponse parts as tool messages when native tool_calls exist (坑25: 无原生 tool_calls 时转 user 文本)', () => {
     const body = {
       contents: [
         {
@@ -100,9 +114,12 @@ describe('mapGeminiToOpenAI', () => {
         },
       ],
     };
+    // 坑 25：无前置 model 轮 tool_calls（prompt-XML 模式）时，functionResponse
+    // 转为 user 文本（LS prompt 约定工具结果由 user 回传）。
     const result = mapGeminiToOpenAI(body, 'gpt-4o');
-    expect(result.messages[0].role).toBe('tool');
-    expect(result.messages[0].content).toBe('result data');
+    expect(result.messages[0].role).toBe('user');
+    expect(String(result.messages[0].content)).toContain('search');
+    expect(String(result.messages[0].content)).toContain('result data');
   });
 
   it('should include temperature and max_tokens from generationConfig', () => {
@@ -238,8 +255,12 @@ describe('mapOpenAIToGemini', () => {
     };
     const result = mapOpenAIToGemini(res, 'gpt-4o');
     expect(result.candidates[0].finishReason).toBe('STOP');
-    expect(result.candidates[0].content.parts[0].functionCall).toBeDefined();
-    expect(result.candidates[0].content.parts[0].functionCall!.name).toBe('search');
+    // 坑 25：交付为 prompt-XML 文本（LS 对自定义模型只解析文本标记）
+    const textParts = result.candidates[0].content.parts.filter((p) => p.text && !p.thought);
+    const xml = textParts.map((p) => p.text).join('');
+    expect(xml).toContain('<search>');
+    expect(xml).toContain('"query":"test"');
+    expect(xml).toContain('</search>');
   });
 
   it('should parse DSML tool calls from text content', () => {
@@ -257,8 +278,13 @@ describe('mapOpenAIToGemini', () => {
     };
     const result = mapOpenAIToGemini(res, 'deepseek-v4');
     expect(result.candidates[0].finishReason).toBe('STOP');
-    const fcParts = result.candidates[0].content.parts.filter((p) => p.functionCall);
-    expect(fcParts.length).toBeGreaterThan(0);
+    // 坑 25：DSML 标记消费后以标准 prompt-XML 文本交付
+    const xml = result.candidates[0].content.parts
+      .filter((p) => p.text && !p.thought)
+      .map((p) => p.text)
+      .join('');
+    expect(xml).toContain('<search_web>');
+    expect(xml).toContain('"query":"news"');
   });
 
   it('should register DSML tool calls for response round-trip', () => {
@@ -275,14 +301,19 @@ describe('mapOpenAIToGemini', () => {
       usage: { prompt_tokens: 5, completion_tokens: 10, total_tokens: 15 },
     };
     const result = mapOpenAIToGemini(res, 'deepseek-v4');
-    const fcParts = result.candidates[0].content.parts.filter((p) => p.functionCall);
-    expect(fcParts.length).toBe(1);
-    expect(fcParts[0].functionCall!.name).toBe('list_dir');
-    expect(fcParts[0].functionCall!.id).toBeDefined();
-    const id = fcParts[0].functionCall!.id!;
-    expect(shared.modelToolCallIds.get('deepseek-v4')?.['run_command']).toBe(id);
-    expect(shared.translatedToolCalls.get(id)?.originalName).toBe('run_command');
-    expect(shared.translatedToolCalls.get(id)?.translatedName).toBe('list_dir');
+    // 坑 25：文本交付下验证 prompt-XML 块与状态注册
+    const xml = result.candidates[0].content.parts
+      .filter((p) => p.text && !p.thought)
+      .map((p) => p.text)
+      .join('');
+    expect(xml).toContain('<list_dir>');
+    // ls → list_dir 翻译后参数为 DirectoryPath（原 CommandLine 已翻译）
+    expect(xml).toContain('"DirectoryPath"');
+    expect(xml).toContain('</list_dir>');
+    const id = shared.modelToolCallIds.get('deepseek-v4')?.['run_command'];
+    expect(id).toBeDefined();
+    expect(shared.translatedToolCalls.get(id!)?.originalName).toBe('run_command');
+    expect(shared.translatedToolCalls.get(id!)?.translatedName).toBe('list_dir');
   });
 
   it('should scope tool-call state per sessionId (concurrent sessions are isolated)', () => {
@@ -347,7 +378,11 @@ describe('mapOpenAIToGemini', () => {
       },
       'deepseek-v4',
     );
-    const fc = response.candidates[0].content.parts.find((p) => p.functionCall)!.functionCall!;
+    // 坑 25：交付是 prompt-XML 文本（无 functionCall part）；反向历史中的
+    // model 轮以 assistant tool_calls 形态重建（保持 tool role 通道语义），
+    // 此处手工构造 model 轮 functionCall（LS 真实历史里工具结果由 user 文本回传，
+    // 但若 LS 发来 functionCall+functionResponse 结构，链路须仍成立）。
+    const fc = { name: 'list_dir', args: { DirectoryPath: '/repo' }, id: 'call_xml_1' };
     // Turn 2 request: the client sends back a functionResponse WITHOUT an id, in the
     // same request as the assistant's functionCall (as Gemini history does).
     const request = mapGeminiToOpenAI(
@@ -432,7 +467,8 @@ describe('mapOpenAIToGemini', () => {
     const result = mapOpenAIToGemini(res, 'deepseek-v4');
     const parts = result.candidates[0].content.parts;
     expect(parts.some((p) => p.thought && p.text === 'thinking...')).toBe(true);
-    expect(parts.some((p) => p.functionCall)).toBe(true);
+    // 坑 25：native tool_calls 交付为 prompt-XML 文本
+    expect(parts.some((p) => p.text && !p.thought && p.text.includes('<list_dir>'))).toBe(true);
   });
 
   it('should include reasoning_content as thought part', () => {
@@ -604,8 +640,16 @@ describe('mapOpenAIChunkToGemini', () => {
     };
     const result = mapOpenAIChunkToGemini(chunk, 'deepseek-v4');
     expect(result).not.toBeNull();
-    const fcParts = result!.content.parts.filter((p) => p.functionCall);
-    expect(fcParts.length).toBeGreaterThan(0);
+    // 新语义：中间帧只暂存调用（正文安全发射、标签不泄漏），收口帧一次性交付
+    expect(result!.content.parts.filter((p) => p.text && p.text.includes('<list_dir>')).length).toBe(0);
+    const stop = mapOpenAIChunkToGemini({ id: 'stream_dsml', choices: [{ delta: {}, finish_reason: 'stop', index: 0 }] }, 'deepseek-v4');
+    expect(stop).not.toBeNull();
+    // 坑 25：收口帧交付 prompt-XML 文本
+    const xml = stop!.content.parts
+      .filter((p) => p.text && !p.thought)
+      .map((p) => p.text)
+      .join('');
+    expect(xml).toContain('<list_dir>');
   });
 });
 
@@ -633,16 +677,15 @@ describe('mapOpenAIToGemini DSML tool_call wrapper', () => {
     };
     const result = mapOpenAIToGemini(res, 'deepseek-v4');
     expect(result.candidates[0].finishReason).toBe('STOP');
-    const fcParts = result.candidates[0].content.parts.filter((p) => p.functionCall);
-    expect(fcParts.length).toBe(1);
-    expect(fcParts[0].functionCall!.name).toBe('list_dir');
-    expect(fcParts[0].functionCall!.args).toEqual({ DirectoryPath: 'D:\\repo' });
-    // raw markup must not leak into text parts
-    const text = result.candidates[0].content.parts
-      .filter((p) => p.text)
-      .map((p) => p.text!)
+    // 坑 25：prompt-XML 文本交付
+    const xml = result.candidates[0].content.parts
+      .filter((p) => p.text && !p.thought)
+      .map((p) => p.text)
       .join('');
-    expect(text).not.toContain('DSML');
+    expect(xml).toContain('<list_dir>');
+    expect(xml).toContain('"DirectoryPath":"D:\\\\repo"');
+    // raw markup must not leak into text parts
+    expect(xml).not.toContain('DSML');
   });
 
   it('should register tool_call-wrapper calls for response round-trip', () => {
@@ -651,11 +694,10 @@ describe('mapOpenAIToGemini DSML tool_call wrapper', () => {
       usage: { prompt_tokens: 5, completion_tokens: 10, total_tokens: 15 },
     };
     const result = mapOpenAIToGemini(res, 'deepseek-v4');
-    const fcParts = result.candidates[0].content.parts.filter((p) => p.functionCall);
-    const id = fcParts[0].functionCall!.id!;
-    expect(shared.modelToolCallIds.get('deepseek-v4')?.['run_command']).toBe(id);
-    expect(shared.translatedToolCalls.get(id)?.originalName).toBe('run_command');
-    expect(shared.translatedToolCalls.get(id)?.translatedName).toBe('list_dir');
+    const id = shared.modelToolCallIds.get('deepseek-v4')?.['run_command'];
+    expect(id).toBeDefined();
+    expect(shared.translatedToolCalls.get(id!)?.originalName).toBe('run_command');
+    expect(shared.translatedToolCalls.get(id!)?.translatedName).toBe('list_dir');
     expect(shared.translatedToolCalls.get(id)?.cmd).toBe('dir');
   });
 
@@ -673,16 +715,15 @@ describe('mapOpenAIToGemini DSML tool_call wrapper', () => {
     };
     const result = mapOpenAIToGemini(res, 'deepseek-v4');
     expect(result.candidates[0].finishReason).toBe('STOP');
-    const fcParts = result.candidates[0].content.parts.filter((p) => p.functionCall);
-    expect(fcParts.length).toBe(1);
-    expect(fcParts[0].functionCall!.name).toBe('list_dir');
-    // intro text survives, but no DSML markup leaks
-    const text = result.candidates[0].content.parts
-      .filter((p) => p.text)
-      .map((p) => p.text!)
+    // 坑 25：prompt-XML 文本交付
+    const xml = result.candidates[0].content.parts
+      .filter((p) => p.text && !p.thought)
+      .map((p) => p.text)
       .join('');
-    expect(text).toContain('Some intro.');
-    expect(text).not.toContain('DSML');
+    expect(xml).toContain('<list_dir>');
+    // intro text survives, but no DSML markup leaks
+    expect(xml).toContain('Some intro.');
+    expect(xml).not.toContain('DSML');
   });
 
   it('should NOT extract a genuinely incomplete tool_call (no closing tag) and fall through to text', () => {
@@ -731,13 +772,20 @@ describe('mapOpenAIToGemini DSML tool_call wrapper', () => {
     expect(texts1).not.toContain('DSML');
 
     const r2 = mapOpenAIChunkToGemini(chunk2, 'deepseek-v4');
-    // Completed block: a real functionCall is emitted, still no raw markup
-    expect(r2).not.toBeNull();
-    const fc = r2!.content.parts.filter((p) => p.functionCall);
-    expect(fc.length).toBe(1);
-    expect(fc[0].functionCall!.name).toBe('list_dir');
-    const texts2 = (r2!.content.parts.filter((p) => p.text).map((p) => p.text!) || []).join('');
+    // Completed block: call is stashed mid-stream (no markup leak), delivered
+    // on the finish frame — one candidate, single STOP.
+    const texts2 = (r2?.content.parts.filter((p) => p.text).map((p) => p.text!) || []).join('');
     expect(texts2).not.toContain('DSML');
+    expect(r2?.content.parts.filter((p) => p.functionCall).length ?? 0).toBe(0);
+    const r3 = mapOpenAIChunkToGemini({ id: streamId, choices: [{ delta: {}, finish_reason: 'stop', index: 0 }] }, 'deepseek-v4');
+    expect(r3).not.toBeNull();
+    expect(r3!.finishReason).toBe('STOP');
+    // 坑 25：收口帧交付 prompt-XML 文本
+    const xml = r3!.content.parts
+      .filter((p) => p.text && !p.thought)
+      .map((p) => p.text)
+      .join('');
+    expect(xml).toContain('<list_dir>');
   });
 
   it('should parse a bare DSML JSON-body tag such as <DSML|_command>{...}</DSML|_command>', () => {
@@ -749,21 +797,20 @@ describe('mapOpenAIToGemini DSML tool_call wrapper', () => {
     };
     const result = mapOpenAIToGemini(res, 'deepseek-v4');
     expect(result.candidates[0].finishReason).toBe('STOP');
-    const fc = result.candidates[0].content.parts.filter((p) => p.functionCall);
-    expect(fc.length).toBe(1);
-    expect(fc[0].functionCall!.name).toBe('run_command');
-    expect(fc[0].functionCall!.args).toEqual({
-      CommandLine: 'git diff ARCHITECTURE.md',
-      Cwd: 'd:\\repo',
-    });
-    // metadata keys are stripped; raw markup never leaks into text
-    expect(fc[0].functionCall!.args).not.toHaveProperty('toolSummary');
-    expect(fc[0].functionCall!.args).not.toHaveProperty('WaitMsBeforeAsync');
-    const text = result.candidates[0].content.parts
-      .filter((p) => p.text)
-      .map((p) => p.text!)
+    // 坑 25：prompt-XML 文本交付（JSON 单行内嵌）
+    const xml = result.candidates[0].content.parts
+      .filter((p) => p.text && !p.thought)
+      .map((p) => p.text)
       .join('');
-    expect(text).not.toContain('DSML');
+    expect(xml).toContain('<run_command>');
+    expect(xml).toContain('"CommandLine":"git diff ARCHITECTURE.md"');
+    expect(xml).toContain('"Cwd":"d:\\\\repo"');
+    expect(xml).toContain('"WaitMsBeforeAsync":10000');
+    expect(xml).toContain('"toolSummary":"Viewing ARCHITECTURE.md diff"');
+    expect(xml).toContain('"toolAction":"Inspecting ARCHITECTURE.md changes"');
+    expect(xml).toContain('</run_command>');
+    // 坑 15：metadata 键是 IDE schema 必填参数，必须保留；原始标记不得泄漏进文本
+    expect(xml).not.toContain('DSML');
   });
 });
 
@@ -779,18 +826,14 @@ describe('mapOpenAIToGemini GLM & Multi-Model Text Tool Calls', () => {
     };
     const result = mapOpenAIToGemini(res, 'glm-5.2');
     expect(result.candidates[0].finishReason).toBe('STOP');
-    const fc = result.candidates[0].content.parts.filter((p) => p.functionCall);
-    expect(fc.length).toBe(1);
-    expect(fc[0].functionCall!.name).toBe('list_dir');
-    expect(fc[0].functionCall!.args).toEqual({ DirectoryPath: 'd:\\programme\\fuli_crawler' });
-    // lead-in text is preserved, raw tags stripped
-    const text = result.candidates[0].content.parts
-      .filter((p) => p.text)
-      .map((p) => p.text!)
-      .join('');
-    expect(text).toContain('我来检查项目的所有代码');
-    expect(text).not.toContain('<tool_call>');
-    expect(text).not.toContain('toolAction');
+    // 坑 25：prompt-XML 文本交付；lead-in 文本保留、原始标记不泄漏
+    const xml = xmlOf(result.candidates[0]);
+    expectXmlCall(xml, 'list_dir');
+    expect(xml).toContain('"DirectoryPath":"d:\\\\programme\\\\fuli_crawler"');
+    expect(xml).toContain('"toolAction":"Listing project directory"');
+    expect(xml).toContain('"toolSummary":"Directory listing"');
+    expect(xml).toContain('我来检查项目的所有代码');
+    expect(xml).not.toContain('<tool_call>');
   });
 
   it('should parse GLM / standard <tool_call>name\n{...}</tool_call>', () => {
@@ -802,10 +845,9 @@ describe('mapOpenAIToGemini GLM & Multi-Model Text Tool Calls', () => {
     };
     const result = mapOpenAIToGemini(res, 'glm-5.2');
     expect(result.candidates[0].finishReason).toBe('STOP');
-    const fc = result.candidates[0].content.parts.filter((p) => p.functionCall);
-    expect(fc.length).toBe(1);
-    expect(fc[0].functionCall!.name).toBe('view_file');
-    expect(fc[0].functionCall!.args).toEqual({ AbsolutePath: 'd:\\test\\app.ts' });
+    const xml = xmlOf(result.candidates[0]);
+    expectXmlCall(xml, 'view_file');
+    expect(xml).toContain('"AbsolutePath":"d:\\\\test\\\\app.ts"');
   });
 
   it('should parse Hermes / Qwen format <tool_call>{"name": "...", "arguments": {...}}</tool_call>', () => {
@@ -817,10 +859,10 @@ describe('mapOpenAIToGemini GLM & Multi-Model Text Tool Calls', () => {
     };
     const result = mapOpenAIToGemini(res, 'qwen-2.5');
     expect(result.candidates[0].finishReason).toBe('STOP');
-    const fc = result.candidates[0].content.parts.filter((p) => p.functionCall);
-    expect(fc.length).toBe(1);
-    expect(fc[0].functionCall!.name).toBe('grep_search');
-    expect(fc[0].functionCall!.args).toEqual({ Query: 'findMe', SearchPath: 'D:\\project' });
+    const xml = xmlOf(result.candidates[0]);
+    expectXmlCall(xml, 'grep_search');
+    expect(xml).toContain('"Query":"findMe"');
+    expect(xml).toContain('"SearchPath":"D:\\\\project"');
   });
 
   it('should parse Antigravity call tag format <call:default_api:list_dir{...}>', () => {
@@ -832,10 +874,9 @@ describe('mapOpenAIToGemini GLM & Multi-Model Text Tool Calls', () => {
     };
     const result = mapOpenAIToGemini(res, 'custom-model');
     expect(result.candidates[0].finishReason).toBe('STOP');
-    const fc = result.candidates[0].content.parts.filter((p) => p.functionCall);
-    expect(fc.length).toBe(1);
-    expect(fc[0].functionCall!.name).toBe('list_dir');
-    expect(fc[0].functionCall!.args).toEqual({ DirectoryPath: 'D:\\workspace' });
+    const xml = xmlOf(result.candidates[0]);
+    expectXmlCall(xml, 'list_dir');
+    expect(xml).toContain('"DirectoryPath":"D:\\\\workspace"');
   });
 
   it('should hold GLM-5.2 <tool_call> markup during streaming and emit STOP at finish', () => {
@@ -872,10 +913,12 @@ describe('mapOpenAIToGemini GLM & Multi-Model Text Tool Calls', () => {
     const r2 = mapOpenAIChunkToGemini(chunk2, 'glm-5.2');
     expect(r2).not.toBeNull();
     expect(r2!.finishReason).toBe('STOP');
-    const fc = r2!.content.parts.filter((p) => p.functionCall);
-    expect(fc.length).toBe(1);
-    expect(fc[0].functionCall!.name).toBe('list_dir');
-    expect(fc[0].functionCall!.args).toEqual({ DirectoryPath: 'd:\\programme\\fuli_crawler' });
+    // 坑 25：收口帧交付 prompt-XML 文本
+    const xml = xmlOf(r2!);
+    expectXmlCall(xml, 'list_dir');
+    expect(xml).toContain('"DirectoryPath":"d:\\\\programme\\\\fuli_crawler"');
+    expect(xml).toContain('"toolAction":"Listing project directory"');
+    expect(xml).toContain('"toolSummary":"Directory listing"');
   });
 });
 
@@ -890,15 +933,13 @@ describe('Antigravity lean bare-tag tool calls', () => {
       usage: { prompt_tokens: 5, completion_tokens: 15, total_tokens: 20 },
     };
     const result = mapOpenAIToGemini(res, 'deepseek-v4-flash');
-    const fc = result.candidates[0].content.parts.filter((p) => p.functionCall);
-    expect(fc.length).toBe(1);
-    expect(fc[0].functionCall!.name).toBe('run_command');
-    expect(fc[0].functionCall!.args).toEqual({ CommandLine: 'git status', Cwd: 'd:\\project' });
-    const text = result.candidates[0].content.parts
-      .filter((p) => p.text)
-      .map((p) => p.text!)
-      .join('');
-    expect(text).not.toContain('run_command>');
+    // 坑 25：prompt-XML 文本交付
+    const xml = xmlOf(result.candidates[0]);
+    expectXmlCall(xml, 'run_command');
+    expect(xml).toContain('"CommandLine":"git status"');
+    expect(xml).toContain('"Cwd":"d:\\\\project"');
+    // 原始标记不得二次泄漏：正文里不应再出现裸开标签残余（规范块恰一次）
+    expect(xml.split('<run_command>').length - 1).toBe(1);
   });
 
   it('should parse bare <view_file> with Param>value lean args (BAI leak)', () => {
@@ -909,10 +950,12 @@ describe('Antigravity lean bare-tag tool calls', () => {
       usage: { prompt_tokens: 5, completion_tokens: 15, total_tokens: 20 },
     };
     const result = mapOpenAIToGemini(res, 'deepseek-v4-flash');
-    const fc = result.candidates[0].content.parts.filter((p) => p.functionCall);
-    expect(fc.length).toBe(1);
-    expect(fc[0].functionCall!.name).toBe('view_file');
-    expect(fc[0].functionCall!.args).toEqual({ AbsolutePath: 'C:\\Users\\test\\SKILL.md', IsSkillFile: true });
+    // 坑 25：prompt-XML 文本交付；lean 参数子标签规范化为 JSON
+    const xml = xmlOf(result.candidates[0]);
+    expectXmlCall(xml, 'view_file');
+    expect(xml).toContain('"AbsolutePath":"C:\\\\Users\\\\test\\\\SKILL.md"');
+    expect(xml).toContain('"IsSkillFile":true');
+    expect(xml).toContain('"toolSummary":"Reading skill file"');
   });
 
   it('should parse <tool_call> with lean args (GLM early-end) instead of dropping it', () => {
@@ -941,10 +984,11 @@ describe('Antigravity lean bare-tag tool calls', () => {
     const r2 = mapOpenAIChunkToGemini(chunk2, 'glm-5.2');
     expect(r2).not.toBeNull();
     expect(r2!.finishReason).toBe('STOP');
-    const fc = r2!.content.parts.filter((p) => p.functionCall);
-    expect(fc.length).toBe(1);
-    expect(fc[0].functionCall!.name).toBe('run_command');
-    expect(fc[0].functionCall!.args).toEqual({ CommandLine: 'git status -s', Cwd: 'd:\\project' });
+    // 坑 25：收口帧交付 prompt-XML 文本
+    const xml = xmlOf(r2!);
+    expectXmlCall(xml, 'run_command');
+    expect(xml).toContain('"CommandLine":"git status -s"');
+    expect(xml).toContain('"Cwd":"d:\\\\project"');
   });
 
   it('should hold bare <run_command> markup during streaming and emit functionCall', () => {
@@ -956,15 +1000,13 @@ describe('Antigravity lean bare-tag tool calls', () => {
       { id: streamId, choices: [{ delta: { content: '' }, finish_reason: 'stop', index: 0 }] },
     ];
     const results = chunks.map((c) => mapOpenAIChunkToGemini(c, 'deepseek-v4-flash'));
-    // The closed bare tag must still be parsed into a functionCall at finish (the
+    // The closed bare tag must still be parsed into a tool call at finish (the
     // bare-tag parser runs even when pre-today streaming emission doesn't hold the
     // tag itself). The important guarantee is the tool call is NOT dropped.
-    const fc = results
-      .filter(Boolean)
-      .flatMap((r) => r!.content.parts.filter((p) => p.functionCall).map((p) => p.functionCall!));
-    expect(fc.length).toBe(1);
-    expect(fc[0].name).toBe('run_command');
-    expect(fc[0].args).toEqual({ CommandLine: 'git status' });
+    // 坑 25：交付为 prompt-XML 文本
+    const xml = results.filter(Boolean).map((r) => xmlOf(r!)).join('');
+    expectXmlCall(xml, 'run_command');
+    expect(xml).toContain('"CommandLine":"git status"');
   });
 
   it('should flush held markup as text instead of silently dropping it when parsing fails', () => {
@@ -979,18 +1021,16 @@ describe('Antigravity lean bare-tag tool calls', () => {
       .flatMap((r) => r!.content.parts.filter((p) => p.text).map((p) => p.text!))
       .join('');
     // Malformed markup (`???`) is not a valid tool call — it must not be turned
-    // into a bogus functionCall. The lead-in text must survive.
-    const fc = results
-      .filter(Boolean)
-      .flatMap((r) => r!.content.parts.filter((p) => p.functionCall).map((p) => p.functionCall!));
-    expect(fc.length).toBe(0);
-    expect(allText).toContain('前言。');
+    // into a bogus tool call. The lead-in text must survive.
+    const xml = results.filter(Boolean).map((r) => xmlOf(r!)).join('');
+    expect(xml).not.toContain('<run_command>');
+    expect(xml).toContain('前言。');
     // The malformed markup is not a valid tool call (no parseable args), so it is
-    // not emitted as a bogus functionCall. The withheld-text buffer flushes the
+    // not emitted as a bogus tool call. The withheld-text buffer flushes the
     // held, unparseable markup back as visible text rather than silently dropping
     // it — the guarantee is that no invalid tool call reaches the IDE (which would
     // abort the conversation), while the user's content is preserved.
-    expect(allText).toContain('<tool_call>'); // 未解析的持有标记被冲刷回文本，不再静默丢弃
+    expect(xml).toContain('<tool_call>'); // 未解析的持有标记被冲刷回文本，不再静默丢弃
   });
 
   it('should NOT parse a bare tag mentioned inline in prose (false-positive guard)', () => {
@@ -1000,10 +1040,10 @@ describe('Antigravity lean bare-tag tool calls', () => {
       usage: { prompt_tokens: 5, completion_tokens: 15, total_tokens: 20 },
     };
     const result = mapOpenAIToGemini(res, 'deepseek-v4-flash');
-    const fc = result.candidates[0].content.parts.filter((p) => p.functionCall);
-    expect(fc.length).toBe(0);
-    const text = result.candidates[0].content.parts.filter((p) => p.text).map((p) => p.text!).join('');
-    expect(text).toContain('view_file');
+    // 坑 25：prose 中的内联标签不得被误解析成调用块（文本保持原样）
+    const xml = xmlOf(result.candidates[0]);
+    expect(xml).not.toContain('<view_file>\n{');
+    expect(xml).toContain('view_file');
   });
 
   it('should NOT parse a bare tag inside a code fence (quoted example)', () => {
@@ -1013,8 +1053,8 @@ describe('Antigravity lean bare-tag tool calls', () => {
       usage: { prompt_tokens: 5, completion_tokens: 15, total_tokens: 20 },
     };
     const result = mapOpenAIToGemini(res, 'deepseek-v4-flash');
-    const fc = result.candidates[0].content.parts.filter((p) => p.functionCall);
-    expect(fc.length).toBe(0);
+    // 坑 25：代码围栏内的标签是引用示例，不得产生调用块
+    expect(xmlOf(result.candidates[0])).not.toContain('<run_command>\n{');
   });
 
   it('should NOT parse a bare tag whose args do not match the declared schema', () => {
@@ -1043,8 +1083,8 @@ describe('Antigravity lean bare-tag tool calls', () => {
       'schema-session-1',
     );
     const result = mapOpenAIToGemini(res, 'deepseek-v4-flash', 'schema-session-1');
-    const fc = result.candidates[0].content.parts.filter((p) => p.functionCall);
-    expect(fc.length).toBe(0);
+    // 坑 25：args 与声明 schema 不匹配 → 不得产生调用块
+    expect(xmlOf(result.candidates[0])).not.toContain('<view_file>\n{');
   });
 
   it('should still parse a REAL bare lean call whose args match the declared schema', () => {
@@ -1068,10 +1108,10 @@ describe('Antigravity lean bare-tag tool calls', () => {
       'schema-session-2',
     );
     const result = mapOpenAIToGemini(res, 'deepseek-v4-flash', 'schema-session-2');
-    const fc = result.candidates[0].content.parts.filter((p) => p.functionCall);
-    expect(fc.length).toBe(1);
-    expect(fc[0].functionCall!.name).toBe('view_file');
-    expect(fc[0].functionCall!.args).toEqual({ AbsolutePath: 'C:\\repo\\app.ts' });
+    // 坑 25：prompt-XML 文本交付
+    const xml = xmlOf(result.candidates[0]);
+    expectXmlCall(xml, 'view_file');
+    expect(xml).toContain('"AbsolutePath":"C:\\\\repo\\\\app.ts"');
   });
 });
 
@@ -1085,14 +1125,15 @@ describe('asymmetric close tag and XML-inner bare-tag args', () => {
       usage: { prompt_tokens: 5, completion_tokens: 15, total_tokens: 20 },
     };
     const result = mapOpenAIToGemini(res, 'glm-5.2');
-    const fc = result.candidates[0].content.parts.filter((p) => p.functionCall);
-    expect(fc.length).toBe(1);
-    expect(fc[0].functionCall!.name).toBe('list_dir');
-    expect(fc[0].functionCall!.args).toEqual({ DirectoryPath: 'd:\\programme\\antigravity-add-model\\src\\translators' });
+    // 坑 25：prompt-XML 文本交付
+    const xml = xmlOf(result.candidates[0]);
+    expectXmlCall(xml, 'list_dir');
+    expect(xml).toContain('"DirectoryPath":"d:\\\\programme\\\\antigravity-add-model\\\\src\\\\translators"');
+    expect(xml).toContain('"toolSummary":"Listing translators directory"');
+    expect(xml).toContain('"toolAction":"Listing translators directory"');
     // The raw markup must be stripped from visible text
-    const text = result.candidates[0].content.parts.filter((p) => p.text).map((p) => p.text!).join('');
-    expect(text).not.toContain('<tool_call:list_dir>');
-    expect(text).toContain('让我检查一下项目中实际实现了哪些提供商/翻译器。');
+    expect(xml).not.toContain('<tool_call:list_dir>');
+    expect(xml).toContain('让我检查一下项目中实际实现了哪些提供商/翻译器。');
   });
 
   it('should NOT emit the asymmetric markup as visible text (streaming)', () => {
@@ -1103,18 +1144,12 @@ describe('asymmetric close tag and XML-inner bare-tag args', () => {
       { id: streamId, choices: [{ delta: { content: ' </list_dir>' }, finish_reason: 'stop', index: 0 }] },
     ];
     const results = chunks.map((c) => mapOpenAIChunkToGemini(c, 'glm-5.2'));
-    const allText = results
-      .filter(Boolean)
-      .flatMap((r) => r!.content.parts.filter((p) => p.text).map((p) => p.text!))
-      .join('');
-    expect(allText).not.toContain('<tool_call:list_dir>');
-    expect(allText).toContain('让我检查一下项目中实际实现了哪些提供商/翻译器。');
-    const fc = results
-      .filter(Boolean)
-      .flatMap((r) => r!.content.parts.filter((p) => p.functionCall).map((p) => p.functionCall!));
-    expect(fc.length).toBe(1);
-    expect(fc[0].name).toBe('list_dir');
-    expect(fc[0].args).toEqual({ DirectoryPath: 'd:\\programme\\antigravity-add-model\\src\\translators' });
+    // 坑 25：全部文本合并后校验
+    const xml = results.filter(Boolean).map((r) => xmlOf(r!)).join('');
+    expect(xml).not.toContain('<tool_call:list_dir>');
+    expect(xml).toContain('让我检查一下项目中实际实现了哪些提供商/翻译器。');
+    expectXmlCall(xml, 'list_dir');
+    expect(xml).toContain('"DirectoryPath":"d:\\\\programme\\\\antigravity-add-model\\\\src\\\\translators"');
   });
 
   it('should parse bare <view_file> with <Param>value</Param> XML-inner args (BAI / SenseNova)', () => {
@@ -1125,16 +1160,14 @@ describe('asymmetric close tag and XML-inner bare-tag args', () => {
       usage: { prompt_tokens: 5, completion_tokens: 15, total_tokens: 20 },
     };
     const result = mapOpenAIToGemini(res, 'sensenova-6.8-flash-lite');
-    const fc = result.candidates[0].content.parts.filter((p) => p.functionCall);
-    expect(fc.length).toBe(1);
-    expect(fc[0].functionCall!.name).toBe('view_file');
-    expect(fc[0].functionCall!.args.AbsolutePath).toBe('d:\\programme\\antigravity-add-model\\README.md');
-    expect(fc[0].functionCall!.args.IsSkillFile).toBe(true);
-    // toolSummary metadata must be stripped
-    expect(fc[0].functionCall!.args.toolSummary).toBeUndefined();
-    const text = result.candidates[0].content.parts.filter((p) => p.text).map((p) => p.text!).join('');
-    expect(text).not.toContain('<view_file>');
-    expect(text).toContain('Let me first read the README.md');
+    // 坑 25：prompt-XML 文本交付
+    const xml = xmlOf(result.candidates[0]);
+    expectXmlCall(xml, 'view_file');
+    expect(xml).toContain('"AbsolutePath":"d:\\\\programme\\\\antigravity-add-model\\\\README.md"');
+    expect(xml).toContain('"IsSkillFile":true');
+    expect(xml).toContain('"toolSummary":"Reading project README"');
+    expect(xml).not.toContain('<view_file>\n<AbsolutePath>');
+    expect(xml).toContain('Let me first read the README.md');
   });
 
   it('should accept bare tool calls with extra metadata keys when declared schema has at least one param', () => {
@@ -1159,10 +1192,10 @@ describe('asymmetric close tag and XML-inner bare-tag args', () => {
       'schema-metadata-sess',
     );
     const result = mapOpenAIToGemini(res, 'sensenova-6.8-flash-lite', 'schema-metadata-sess');
-    const fc = result.candidates[0].content.parts.filter((p) => p.functionCall);
-    expect(fc.length).toBe(1);
-    expect(fc[0].functionCall!.name).toBe('view_file');
-    expect(fc[0].functionCall!.args.AbsolutePath).toBe('d:\\repo\\app.ts');
+    // 坑 25：prompt-XML 文本交付
+    const xml = xmlOf(result.candidates[0]);
+    expectXmlCall(xml, 'view_file');
+    expect(xml).toContain('"AbsolutePath":"d:\\\\repo\\\\app.ts"');
   });
 });
 

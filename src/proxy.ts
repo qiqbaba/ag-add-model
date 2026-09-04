@@ -332,6 +332,18 @@ function decompressResponseBody(
 
 function proxyToGoogle(req: http.IncomingMessage, res: http.ServerResponse, reqBody: Buffer): void {
   const isCloudCodeUrl = req.url!.includes('v1internal') || req.url!.includes('daily-cloudcode');
+  // TEMP-DEBUG（坑25续）：dump 轨迹上报——LS 视角步骤/工具调用记录的唯一可靠证据源。
+  if (rawStreamEnabled() && req.url!.includes('recordTrajectoryAnalytics')) {
+    try {
+      const fsMod = require('node:fs') as typeof import('node:fs');
+      const pathMod = require('node:path') as typeof import('node:path');
+      const out = pathMod.join(process.env.TEMP || process.cwd(), `dsh-traj-${Date.now()}.json`);
+      fsMod.writeFileSync(out, reqBody);
+      log.info(`[Proxy][TRAJECTORY] saved ${reqBody.length}B -> ${out}`);
+    } catch (e) {
+      log.info(`[Proxy][TRAJECTORY] dump failed: ${(e as Error).message}`);
+    }
+  }
   const targetUrl = isCloudCodeUrl
     ? 'https://daily-cloudcode-pa.googleapis.com'
     : 'https://generativelanguage.googleapis.com';
@@ -644,6 +656,7 @@ function handleCustomModelRequest(
 
       let buffer = '';
       let lastFinishReason: string | undefined;
+let lastUpstreamUsage: { promptTokenCount: number; candidatesTokenCount: number; totalTokenCount: number } | undefined;
       // StringDecoder preserves multi-byte UTF-8 characters split across TCP
       // chunk boundaries (chunk.toString() would corrupt them into �).
       const decoder = new StringDecoder('utf-8');
@@ -664,6 +677,16 @@ function handleCustomModelRequest(
               if (rawStreamEnabled()) {
                 log.info(`[Proxy][RAW:${model.name}] ${dataStr}`);
               }
+              // 坑 22：记录上游 usage 帧（choices=[] 的收尾 chunk），供 responseMeta
+              // 填真实 token 数（官方帧 usageMetadata 始终非零）。
+              const upUsage = (parsed as { usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } }).usage;
+              if (upUsage) {
+                lastUpstreamUsage = {
+                  promptTokenCount: upUsage.prompt_tokens || 0,
+                  candidatesTokenCount: upUsage.completion_tokens || 0,
+                  totalTokenCount: upUsage.total_tokens || 0,
+                };
+              }
               const mapped = registry.translateStreamChunk(provider, parsed, model.name, sessionId, streamInstanceId);
 
               if (mapped) {
@@ -674,12 +697,53 @@ function handleCustomModelRequest(
                 if (rawStreamEnabled()) {
                   log.info(`[Proxy][MAP:${model.name}] ${JSON.stringify(mapped)}`);
                 }
-                const cloudCodeResponse = {
-                  response: { candidates: [mapped] },
-                  traceId: '',
-                  metadata: {},
+                // 坑 19：官方（内置 gemini）的流中，functionCall 帧的 candidate 只含
+                // content —— 从不携带 finishReason；终止（STOP）由独立的空文本帧下发。
+                // 若把 finishReason 与 functionCall 放进同一帧，LS 规划器把它当终止帧
+                // 处理（stopReason=STOP_PATTERN），帧内的 functionCall 全部丢弃 →
+                // "提前结束、工具不执行"。此处拆帧：先发调用帧（无 finishReason），
+                // finishReason 留给流末 fallback 空 STOP 帧补发。
+                // 坑 22：官方对第三方模型（claude-sonnet-4-6，toolu_vrtx id 成功执行）
+                // 的调用帧结构对照证实：调用帧 response 级必须带 usageMetadata /
+                // modelVersion / responseId，且 traceId 非空——这是我们与官方流仅剩
+                // 的 response 级差异。
+                const mappedAny = mapped as {
+                  content?: { parts?: Array<Record<string, unknown>> };
+                  finishReason?: string;
+                  usageMetadata?: unknown;
                 };
-                res.write(`data: ${JSON.stringify(cloudCodeResponse)}\n\n`);
+                const fcParts = (mappedAny.content?.parts || []).filter((p) => p && p.functionCall);
+                const responseMeta = {
+                  usageMetadata: lastUpstreamUsage ?? mappedAny.usageMetadata ?? {
+                    promptTokenCount: 0,
+                    candidatesTokenCount: 0,
+                    totalTokenCount: 0,
+                  },
+                  modelVersion: model.name,
+                  responseId: `req_${sessionId || 'proxy'}_${Date.now().toString(36)}`,
+                };
+                const traceId = sessionId ? Buffer.from(String(sessionId)).toString('hex').slice(0, 16) : 'proxydefault00';
+                if (fcParts.length > 0) {
+                  const callFrame = {
+                    response: {
+                      candidates: [{ content: { parts: fcParts, role: 'model' } },],
+                      ...responseMeta,
+                    },
+                    traceId,
+                    metadata: {},
+                  };
+                  res.write(`data: ${JSON.stringify(callFrame)}\n\n`);
+                  if (rawStreamEnabled()) {
+                    log.info(`[Proxy][MAP-SPLIT:${model.name}] functionCall 帧已与 finishReason 分离`);
+                  }
+                } else {
+                  const cloudCodeResponse = {
+                    response: { candidates: [mapped], ...(mappedAny.finishReason && mappedAny.finishReason !== 'OTHER' ? responseMeta : {}) },
+                    traceId,
+                    metadata: {},
+                  };
+                  res.write(`data: ${JSON.stringify(cloudCodeResponse)}\n\n`);
+                }
               }
             } catch (err) {
               // Partial/invalid JSON chunks are normal during streaming; debug-level only
@@ -702,12 +766,24 @@ function handleCustomModelRequest(
                 if (mappedObj.finishReason && mappedObj.finishReason !== 'OTHER') {
                   lastFinishReason = mappedObj.finishReason;
                 }
-                const cloudCodeResponse = {
-                  response: { candidates: [mapped] },
-                  traceId: '',
-                  metadata: {},
-                };
-                res.write(`data: ${JSON.stringify(cloudCodeResponse)}\n\n`);
+                // 坑 19：drain 路径同样拆帧（调用帧无 finishReason，见上）
+                const mappedAny2 = mapped as { content?: { parts?: Array<Record<string, unknown>> } };
+                const fcParts2 = (mappedAny2.content?.parts || []).filter((p) => p && p.functionCall);
+                if (fcParts2.length > 0) {
+                  const callFrame2 = {
+                    response: { candidates: [{ content: { parts: fcParts2, role: 'model' } }] },
+                    traceId: '',
+                    metadata: {},
+                  };
+                  res.write(`data: ${JSON.stringify(callFrame2)}\n\n`);
+                } else {
+                  const cloudCodeResponse = {
+                    response: { candidates: [mapped] },
+                    traceId: '',
+                    metadata: {},
+                  };
+                  res.write(`data: ${JSON.stringify(cloudCodeResponse)}\n\n`);
+                }
               }
             } catch (e) {
               log.debug(`[Proxy] Stream buffer drain parse warning for ${model.name}:`, (e as Error).message);
@@ -716,12 +792,13 @@ function handleCustomModelRequest(
         }
 
         // Only send a fallback STOP chunk if the stream closed without ANY terminal finishReason (e.g. STOP or TOOL_CALL)
+        // 坑 19 收口帧形态对齐官方：parts 为单个空文本 part（官方透传帧观察），非空数组。
         if (!lastFinishReason) {
           const finalChunk = {
             response: {
               candidates: [
                 {
-                  content: { parts: [], role: 'model' },
+                  content: { parts: [{ text: '' }], role: 'model' },
                   finishReason: 'STOP',
                   index: 0,
                 },
@@ -1568,6 +1645,46 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
                     // name as a string makes the LS Go decoder reject the whole
                     // fetchAvailableModels response and breaks login (坑 8).
                     thinkingLevel: 0,
+                    // 坑 24（终极根因）：LS 的 ModelInfo.model_features 是嵌套消息
+                    // （exa.codeium_common_pb.ModelFeatures，descriptor 实证），其中
+                    // supports_tool_calls 是规划器是否解析响应中 functionCall 的总开关。
+                    // 此前从未注入 modelFeatures → proto 默认 false → LS 认为模型不
+                    // 支持工具 → 无论帧结构多完美，functionCall 一律在解析层被丢弃
+                    //（stopReason=OTHER、toolCalls=[]、14:35 还触发
+                    // EmptyOutputContinuationCheckHook 空输出钩子）。官方模型此位为
+                    // true 所以工具正常。
+                    modelFeatures: {
+                      zeroShotCapable: true,
+                      supportsImages: cap.supportsImages,
+                      supportsPdf: cap.supportsImages,
+                      supportsToolCalls: true,
+                      doesNotSupportToolChoice: false,
+                      supportsCumulativeContext: false,
+                      supportsThinking: cap.isThinking,
+                      supportsAdaptiveThinking: false,
+                      supportsRawThinking: false,
+                      supportsThoughtCirculation: false,
+                      supportsDeferredToolLoading: false,
+                      supportsEstimateTokenCounter: false,
+                      addCursorToFindReplaceTarget: false,
+                      supportsTabJumpUseWholeDocument: false,
+                      supportsModelInfoOverride: false,
+                      requiresLeadInGeneration: false,
+                      requiresNoXmlToolExamples: false,
+                      requiresInstructTags: false,
+                      requiresFimContext: false,
+                      requiresContextSnippetPrefix: false,
+                      requiresContextRelevanceTags: false,
+                      requiresLlama3Tokens: false,
+                      requiresAutocompleteAsCommand: false,
+                      supportsCursorAwareSupercomplete: false,
+                      supportsVideo: false,
+                      supportsMiddleMode: false,
+                      supportsImageCaptions: false,
+                      supportsEstimateTokenizer: false,
+                    },
+                    // 顶层同名字段保留（旧版 IDE 直接读平铺位）
+                    supportsToolCalls: true,
                     requiresNoXmlToolExamples: false,
                     preview: false,
                     disabled: false,
@@ -1898,6 +2015,19 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
             log.info(
               `[Proxy] Intercepting Cloud Code generation for custom model: ${modelName} => ${matchedCustomModel.displayName}`,
             );
+            // TEMP-DEBUG（坑25续）：dump 自定义模型完整请求体（tools/systemInstruction/
+            // customModelInfoOverride 等能力字段），定位 functionCall 忽略判定来源。
+            if (rawStreamEnabled()) {
+              try {
+                const fsMod = require('node:fs') as typeof import('node:fs');
+                const pathMod = require('node:path') as typeof import('node:path');
+                const out = pathMod.join(process.env.TEMP || process.cwd(), `dsh-extreq-${Date.now()}.json`);
+                fsMod.writeFileSync(out, JSON.stringify(reqJson, null, 1));
+                log.info(`[Proxy][EXTREQ] saved -> ${out}`);
+              } catch (e) {
+                log.info(`[Proxy][EXTREQ] dump failed: ${(e as Error).message}`);
+              }
+            }
             const isStream = req.url!.includes('streamGenerateContent') || req.url!.includes('alt=sse');
             const actualGeminiBody = (reqJson.request || reqJson) as GeminiRequestBody;
             // Use the Cloud Code requestId as the conversation/session identifier so

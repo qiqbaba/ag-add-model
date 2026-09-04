@@ -20,6 +20,7 @@ import {
   stateTimestamps,
   touchStateTimestamp,
   stateKey,
+  generateSyntheticCallId,
 } from '../shared';
 import { detectModelCapabilitiesByName } from '../modelUtils';
 
@@ -213,9 +214,7 @@ export function mapGeminiToAnthropic(
           item.parts.forEach((p, partIdx) => {
             if (p.text) contentBlocks.push({ type: 'text', text: p.text });
             if (p.functionCall) {
-              const callId =
-                p.functionCall.id ||
-                `call_${itemIdx}_${partIdx}_${p.functionCall.name || 'func'}`;
+              const callId = p.functionCall.id || generateSyntheticCallId();
               if (p.functionCall.name) {
                 lastCallIdByName[p.functionCall.name] = callId;
               }
@@ -284,7 +283,7 @@ export function mapGeminiToAnthropic(
                   p.functionResponse.id ||
                   lastCallIdByName[funcName] ||
                   modelTCIds[funcName] ||
-                  `call_${itemIdx}_${partIdx}_${funcName || 'func'}`;
+                  generateSyntheticCallId();
               }
 
               const responseData = p.functionResponse.response;

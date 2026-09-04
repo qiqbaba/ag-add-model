@@ -260,7 +260,11 @@ export function normalizeToolArgs(
   name: string,
   args: Record<string, unknown> | null | undefined,
 ): Record<string, unknown> {
-  if (!args || typeof args !== 'object') return args || {};
+  // A non-object args (string/number/bool from a gateway that stuffed raw text
+  // into tool_calls.arguments) is never a valid Gemini functionCall args Struct;
+  // coercing to {} prevents the Go LS from receiving a string `arguments_json`
+  // and aborting the whole turn with `invalid_json`.
+  if (!args || typeof args !== 'object') return {};
 
   // Handle array args
   if (Array.isArray(args)) {
@@ -440,6 +444,14 @@ export function translateToolCallToNative(name: string, args: ToolCallArgs): Tra
   const cmd = args.CommandLine.trim();
   const cwd = args.Cwd || process.cwd();
 
+  // 坑 15：toolSummary / toolAction / WaitMsBeforeAsync 是 IDE 工具 schema 的必填
+  // 参数（LS 校验 functionCall.args 缺失即丢弃整个调用）。命令翻译重建 args 时必须
+  // 原样透传这些键。
+  const passthrough: Record<string, unknown> = {};
+  for (const k of ['toolSummary', 'toolAction', 'WaitMsBeforeAsync', 'waitMsBeforeAsync']) {
+    if (args[k] !== undefined) passthrough[k] = args[k];
+  }
+
   // 1. list_dir translation
   const isListDir = /^(ls|dir)\b/i.test(cmd);
   if (isListDir) {
@@ -452,7 +464,7 @@ export function translateToolCallToNative(name: string, args: ToolCallArgs): Tra
       dirPath = path.isAbsolute(cleanPath) ? cleanPath : path.resolve(cwd, cleanPath);
     }
     log.info(`[Proxy] Translating run_command "${cmd}" to list_dir on "${dirPath}"`);
-    return { name: 'list_dir', args: { DirectoryPath: dirPath } };
+    return { name: 'list_dir', args: { ...passthrough, DirectoryPath: dirPath } };
   }
 
   // 2. view_file translation
@@ -461,7 +473,7 @@ export function translateToolCallToNative(name: string, args: ToolCallArgs): Tra
     const filePath = catMatch[3].trim();
     const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(cwd, filePath);
     log.info(`[Proxy] Translating run_command "${cmd}" to view_file on "${absPath}"`);
-    return { name: 'view_file', args: { AbsolutePath: absPath } };
+    return { name: 'view_file', args: { ...passthrough, AbsolutePath: absPath } };
   }
 
   // 2b. write_file translation (echo redirect)
@@ -473,7 +485,10 @@ export function translateToolCallToNative(name: string, args: ToolCallArgs): Tra
     const filePath = echoRedirectMatch[3].trim();
     const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(cwd, filePath);
     log.info(`[Proxy] Translating run_command "${cmd}" to write_file on "${absPath}"`);
-    return { name: 'write_file', args: { AbsolutePath: absPath, Content: content, Append: cmd.includes('>>') } };
+    return {
+      name: 'write_file',
+      args: { ...passthrough, AbsolutePath: absPath, Content: content, Append: cmd.includes('>>') },
+    };
   }
 
   // 3. grep_search translation
@@ -501,6 +516,7 @@ export function translateToolCallToNative(name: string, args: ToolCallArgs): Tra
       return {
         name: 'grep_search',
         args: {
+          ...passthrough,
           Query: query,
           SearchPath: searchPath,
           CaseInsensitive: cmd.includes('-i') || cmd.toLowerCase().includes('/i'),

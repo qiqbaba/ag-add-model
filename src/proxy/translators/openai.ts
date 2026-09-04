@@ -23,7 +23,11 @@ import {
   stateTimestamps,
   touchStateTimestamp,
   stateKey,
+  generateSyntheticCallId,
 } from '../shared';
+// 坑 25：prompt-based 工具调用交付层——LS 对自定义模型只解析响应文本中的
+// <tool_name>{json}</tool_name> 块（详见 prompt-xml.ts 头注）。
+import { serializeToolCallsAsPromptXml } from './prompt-xml';
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -59,6 +63,7 @@ interface GeminiContent {
 interface GeminiPart {
   text?: string;
   thought?: boolean;
+  thoughtSignature?: string;
   functionCall?: GeminiFunctionCall;
   functionResponse?: GeminiFunctionResponse;
   fileData?: { mimeType: string; fileUri: string };
@@ -185,6 +190,17 @@ interface DSMLParsedResult {
 }
 
 /**
+ * 坑 17：上游（商汤 V4 Flash 等）会随机把 DSML 标记的竖线输出为全角 ｜（U+FF5C），
+ * 形如 `<｜DSML｜tool name="view_file">`。现有解析器只认 ASCII `|`，导致整段
+ * 标记泄漏为正文、工具调用全部丢失（"提前结束"的又一根因）。
+ * 在文本进入解析/holdback 链路前统一归一化。模式要求 `<｜DSML｜` / `</｜DSML｜`
+ * 连续序列，正文误含概率几乎为零。
+ */
+function normalizeDSMLPipes(text: string): string {
+  return text.replace(/<｜DSML｜/g, '<DSML|').replace(/<\/｜DSML｜/g, '</DSML|');
+}
+
+/**
  * Markers that indicate a tool call block has started in text.
  */
 const TOOL_CALL_START_MARKERS = [
@@ -308,6 +324,30 @@ function withheldStartsWithMarkup(held: string): boolean {
 }
 
 /**
+ * Salvage plain body text from a markup-led withheld buffer at a native close
+ * branch. The buffer is an abandoned text-tag call block superseded by a native
+ * delta.tool_calls call, so the call markup itself must never leak — but any
+ * trailing plain text that followed the block is real body content and must not
+ * be silently dropped. Strategy: if the buffer parses as (text-tag) tool call(s),
+ * reuse the parser's cleanText (call blocks removed); otherwise strip any
+ * remaining tag-like tokens. Returns '' when nothing worth emitting remains.
+ */
+function salvagePlainTextFromMarkupLedHeld(held: string, toolNames: string[], schemas: Record<string, string[]> | null): string {
+  const parsed = parseDSMLToolCalls(held, true, toolNames, schemas);
+  if (parsed && parsed.functionCalls.length > 0) {
+    // Only trust the parser when every recovered call name is a known tool —
+    // otherwise (e.g. it mistook {"name":"x"} for a call to tool "x") fall
+    // through to tag-stripping so trailing body text is not eaten.
+    const known = new Set(toolNames);
+    if (parsed.functionCalls.every((fc) => known.has(fc.name))) {
+      return parsed.cleanText.trim() ? parsed.cleanText : '';
+    }
+  }
+  const stripped = held.replace(/<\/?[A-Za-z_][\w:.-]*(?:\|[^>]*)?>/g, '');
+  return stripped.trim() ? stripped : '';
+}
+
+/**
  * A bare tool tag only counts as a tool-call start when it sits at a block
  * boundary (start of text or first non-whitespace on its own line) and outside
  * a markdown code fence. An inline `<view_file>` in prose is just text.
@@ -388,9 +428,7 @@ export function mapGeminiToOpenAI(
           let reasoning_content = '';
           item.parts.forEach((p, partIdx) => {
             if (p.functionCall) {
-              const callId =
-                p.functionCall.id ||
-                `call_${itemIdx}_${partIdx}_${p.functionCall.name || 'func'}`;
+              const callId = p.functionCall.id || generateSyntheticCallId();
               if (p.functionCall.name) {
                 lastCallIdByName[p.functionCall.name] = callId;
               }
@@ -423,9 +461,20 @@ export function mapGeminiToOpenAI(
           if (reasoning_content) msg.reasoning_content = reasoning_content;
           messages.push(msg);
         } else if (hasFunctionResponse) {
-          item.parts.forEach((p, partIdx) => {
-            if (p.functionResponse) {
-              const funcName = p.functionResponse.name || '';
+          // 坑 25：prompt-XML 模式下，上游模型从未发出过 tool_calls（它以文本
+          // 标记表达调用），此时把 functionResponse 转为【文本】并入 user 消息
+          // ——与 LS system prompt 的约定一致："After each tool use, the user
+          // will respond with the result of that tool use"。仅当本次会话历史
+          // 中确实存在上游原生 tool_calls（pendingCallsQueue 非空，即 model 轮
+          // 已生成 tool 消息）时才走 tool role 通道。
+          const useToolRole = pendingCallsQueue.length > 0;
+          const frChunks: string[] = [];
+          item.parts.forEach((p) => {
+            if (!p.functionResponse) return;
+            const funcName = p.functionResponse.name || '';
+            const responseData = p.functionResponse.response;
+            let contentStr = '';
+            if (useToolRole) {
               const modelTCIds = modelToolCallIds.get(stateKeyStr) || {};
               let toolCallId: string | undefined = undefined;
 
@@ -456,11 +505,9 @@ export function mapGeminiToOpenAI(
                   p.functionResponse.id ||
                   lastCallIdByName[funcName] ||
                   modelTCIds[funcName] ||
-                  `call_${itemIdx}_${partIdx}_${funcName || 'func'}`;
+                  generateSyntheticCallId();
               }
 
-              const responseData = p.functionResponse.response;
-              let contentStr = '';
               const translatedInfo = translatedToolCalls.get(toolCallId);
               if (translatedInfo) {
                 contentStr = formatTranslatedResponse(translatedInfo, responseData);
@@ -468,8 +515,17 @@ export function mapGeminiToOpenAI(
                 contentStr = typeof responseData === 'string' ? responseData : JSON.stringify(responseData || {});
               }
               messages.push({ role: 'tool', content: contentStr, tool_call_id: toolCallId });
+            } else {
+              const translatedInfo = p.functionResponse.id ? translatedToolCalls.get(p.functionResponse.id) : undefined;
+              let body =
+                typeof responseData === 'string' ? responseData : JSON.stringify(responseData || {});
+              if (translatedInfo) body = formatTranslatedResponse(translatedInfo, responseData);
+              frChunks.push(`[Tool result for ${funcName}]\n${body}`);
             }
           });
+          if (frChunks.length > 0) {
+            messages.push({ role: 'user', content: frChunks.join('\n\n') });
+          }
         } else {
           const role = item.role === 'model' ? 'assistant' : item.role || 'user';
           let content: string | OpenAIUserContentPart[] = '';
@@ -590,15 +646,60 @@ export function mapGeminiToOpenAI(
       modelToolSchemas.set(stateKeyStr, schemaRecord);
       touchStateTimestamp(stateTimestamps.toolSchemas, stateKeyStr);
     }
+  } else {
+    // 坑 25（prompt-based 工具调用）：LS 对自定义模型不发 tools 字段——工具
+    // 定义以 "<tool_name>:\n<tool_name>\n{\"$schema\":...}" 段落形式写在
+    // systemInstruction 文本里（实测 dump：90KB system prompt）。从该文本提取
+    // 工具名与参数键并注册，保证响应侧解析器（getLeanToolNames / 参数校验）
+    // 在无 tools 请求时仍有完整名称表，裸标签/DSML 各 Pass 才能命中。
+    const systemText = messages.find((m) => m.role === 'system')?.content;
+    if (typeof systemText === 'string' && systemText) {
+      const names = new Set<string>();
+      const schemaRecord: Record<string, string[]> = {};
+      const defRe = /^([a-z_][a-z0-9_]*):\n<\1>\n/gm;
+      let m: RegExpExecArray | null;
+      while ((m = defRe.exec(systemText)) !== null) {
+        const nm = m[1];
+        names.add(nm);
+        // 提取定义块内的 JSON（从 "{\n{"$schema"" 起到闭合 "}"），取 properties 键
+        const jsonStart = systemText.indexOf('{', m.index + m[0].length);
+        if (jsonStart < 0) continue;
+        // 平衡花括号（粗扫：schema JSON 内字符串不含未转义花括号的概率极高）
+        let depth = 0;
+        let end = -1;
+        for (let i = jsonStart; i < systemText.length && i < jsonStart + 20000; i++) {
+          if (systemText[i] === '{') depth++;
+          else if (systemText[i] === '}') {
+            depth--;
+            if (depth === 0) {
+              end = i;
+              break;
+            }
+          }
+        }
+        if (end < 0) continue;
+        try {
+          const schema = JSON.parse(systemText.slice(jsonStart, end + 1)) as {
+            properties?: Record<string, unknown>;
+          };
+          schemaRecord[nm] = schema.properties ? Object.keys(schema.properties) : [];
+        } catch {
+          schemaRecord[nm] = [];
+        }
+      }
+      if (names.size > 0) {
+        modelToolNames.set(stateKeyStr, names);
+        touchStateTimestamp(stateTimestamps.toolNames, stateKeyStr);
+        modelToolSchemas.set(stateKeyStr, schemaRecord);
+        touchStateTimestamp(stateTimestamps.toolSchemas, stateKeyStr);
+      }
+    }
   }
 
   return payload;
 }
 
 // ─── RESPONSE: OpenAI → Gemini ─────────────────────────────────────────────
-
-/** DSML / Tool metadata keys embedded in the JSON body that must not be forwarded as tool args. */
-const TOOL_METADATA_KEYS = ['toolSummary', 'toolAction', 'WaitMsBeforeAsync', 'waitMsBeforeAsync'];
 
 /**
  * Well-known Antigravity tool names used as a fallback for detecting bare-tag
@@ -641,6 +742,33 @@ function getLeanToolNames(stateKeyStr: string): string[] {
   const declared = modelToolNames.get(stateKeyStr);
   if (declared && declared.size > 0) return [...declared];
   return [...BUILTIN_LEAN_TOOL_NAMES];
+}
+
+/**
+ * 返回 text 末尾与任一工具标签前缀（`<name>` / `</name>` / 标准标记，不含完整
+ * 匹配）一致的最长尾部长度；无匹配返回 0。
+ *
+ * 用于块解析后仍悬在 cleanText 段尾的"半截标签"（上游把 `<run_command>` 跨
+ * chunk 拆成 `<` + `run_command>` 发送）。这类尾巴必须移入 pendingHeldSuffix
+ * 与下一帧重拼，否则会破坏后续裸标签的行首边界检测（坑 16）。
+ */
+function trailingPartialMarkerLen(text: string, toolNames: string[]): number {
+  const markers = [
+    ...TOOL_CALL_START_MARKERS,
+    ...toolNames.map((n) => `<${n}>`),
+    ...toolNames.map((n) => `</${n}>`),
+  ];
+  let hold = 0;
+  for (const marker of markers) {
+    const maxCheck = Math.min(marker.length - 1, text.length);
+    for (let len = maxCheck; len > hold; len--) {
+      if (text.endsWith(marker.slice(0, len))) {
+        hold = len;
+        break;
+      }
+    }
+  }
+  return hold;
 }
 
 function escapeRegExp(s: string): string {
@@ -851,7 +979,14 @@ function extractLeanKeyValues(block: string): Record<string, unknown> | null {
 
   const args: Record<string, unknown> = {};
   for (let i = 0; i < matches.length; i++) {
-    const end = i + 1 < matches.length ? matches[i + 1].matchStart : block.length;
+    let end = i + 1 < matches.length ? matches[i + 1].matchStart : block.length;
+    // A value may be followed by an adjacent XML tag in mixed-format bodies
+    // (e.g. `CommandLine>git status</Cwd>\n<Cwd>...`). Stop at the tag so the
+    // markup isn't swallowed into the value; the XML tags are extracted by a
+    // separate pass (extractXmlInnerArgs) and merged by parseNativeToolArgs.
+    const tail = block.slice(matches[i].valueStart, end);
+    const xmlTagIdx = tail.search(/<\/?[A-Za-z_]/);
+    if (xmlTagIdx !== -1) end = matches[i].valueStart + xmlTagIdx;
     const rawVal = block.slice(matches[i].valueStart, end).trim();
     let val: unknown = rawVal;
     if (rawVal === 'true') val = true;
@@ -860,6 +995,53 @@ function extractLeanKeyValues(block: string): Record<string, unknown> | null {
     args[matches[i].key] = val;
   }
   return args;
+}
+
+/**
+ * Parses the raw `arguments` field of a native OpenAI `tool_calls` entry into a
+ * plain args object.
+ *
+ * Upstream gateways are inconsistent: some emit a proper JSON object
+ * (`{"CommandLine":"ls -la"}`), while others (e.g. the SenseNova gateway serving
+ * GLM-style models) stuff raw lean/XML tool-call text into the field — either as
+ * a JSON string (`"\nCommandLine>git status..."`) or as unquoted markup
+ * (`\nCommandLine>...`). If a non-object leaks through as `functionCall.args`,
+ * the Go language server serializes it as `arguments_json`, fails to JSON-parse
+ * it, and aborts the whole turn with `invalid tool call error (invalid_json)`
+ * (the "premature termination" symptom). This helper guarantees an object.
+ */
+function parseNativeToolArgs(name: string, raw: string): Record<string, unknown> {
+  if (!raw) return {};
+  let text = raw;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+    // JSON-string-wrapped markup → unwrap to the inner text for the parsers below.
+    if (typeof parsed === 'string') text = parsed;
+  } catch {
+    // Not JSON → keep the raw text.
+  }
+  // Raw lean/XML markup: merge both extraction styles so a mixed body
+  // (`CommandLine>git status</Cwd>\n<Cwd>...`) yields all its keys. Lean wins
+  // on collision because its values are already trimmed at the XML boundary.
+   const merged: Record<string, unknown> = {};
+  const xml = extractXmlInnerArgs(text);
+  const lean = extractLeanKeyValues(text);
+  if (xml) Object.assign(merged, xml);
+  if (lean) Object.assign(merged, lean);
+  if (Object.keys(merged).length > 0) return merged;
+  // Bare command line as last resort (only for run_command, and only when the
+  // text does not look like a broken JSON object/array — a JSON fragment that
+  // failed to parse is unrecoverable and must not be run as a shell command).
+  if (name === 'run_command') {
+    const trimmed = text.trim();
+    if (trimmed && trimmed[0] !== '{' && trimmed[0] !== '[') {
+      return { CommandLine: trimmed };
+    }
+  }
+  return {};
 }
 
 /**
@@ -907,7 +1089,10 @@ function parseDSMLToolCalls(
       if (name === 'command' || args.CommandLine !== undefined || args.Cwd !== undefined) {
         name = 'run_command';
       }
-      for (const key of TOOL_METADATA_KEYS) delete args[key];
+      // 坑 15：toolSummary / toolAction / WaitMsBeforeAsync 不是"代理私有元数据"，
+      // 而是 IDE 工具 schema 的必填参数（LS 报错串 "missing or invalid toolSummary
+      // in arguments" 直接校验 args；官方 gemini 的 functionCall.args 也始终携带）。
+      // 此前在此剥除导致 LS 丢弃整个 functionCall → 回退内置模型。
       if (validate && !validate(name, args)) return;
       if (blockFullText) consumedBlocks.push(blockFullText);
       functionCalls.push({ name, args });
@@ -954,6 +1139,15 @@ function parseDSMLToolCalls(
     const dsmlCallRegex = /<DSML\|(?:invoke|tool_call)\s+name="([^"]+)">([\s\S]*?)<\/DSML\|(?:invoke|tool_call)>/g;
     let match: RegExpExecArray | null;
     while ((match = dsmlCallRegex.exec(text)) !== null) {
+      if (match[0] && !insideCodeFence(match.index)) pushCall(match[1], match[2], match[0], validateForPass);
+    }
+
+    // Pass 1b: 坑 17 变体——开标签用 `tool name="X"`，闭标签用 `invoke` 甚至
+    // 重复 `tool_call`（真实商汤流：`<DSML|tool name="view_file">…</DSML|invoke>`
+    // 外层还套了两个多余的 `</DSML|tool_call>`）。按开标签名捕获到最近的
+    // `</DSML|invoke>` 或 `</DSML|tool name=...>` 为止。
+    const dsmlToolNameRegex = /<DSML\|tool\s+name="([^"]+)"[^>]*>([\s\S]*?)<\/DSML\|(?:invoke|tool\s+name="\1")>/g;
+    while ((match = dsmlToolNameRegex.exec(text)) !== null) {
       if (match[0] && !insideCodeFence(match.index)) pushCall(match[1], match[2], match[0], validateForPass);
     }
 
@@ -1088,7 +1282,13 @@ function parseDSMLToolCalls(
     cleanText = cleanText.replace(/<\/?(?:tool_call|function_call|tool|action)[^>]*>/g, '');
     if (toolNames && toolNames.length > 0) {
       const namesAlt = toolNames.map(escapeRegExp).join('|');
-      cleanText = cleanText.replace(new RegExp(`<\\/?(?:${namesAlt})>`, 'g'), '');
+      // 坑 21：只删除【闭合】的裸标签对与孤立的【闭】标签残余。未闭合的开标签
+      // `<run_command>`（下一个在途块的起点）必须保留——它是后续帧
+      // alreadyInsideToolBlock / bare 边界检测的依据，删掉后下一帧起整块参数会
+      // 作为正文泄漏（12:51 真实流）。半截开标签尾由 trailingPartialMarkerLen
+      // / pendingHeldSuffix 通道处理，与此处无关。
+      cleanText = cleanText.replace(new RegExp(`<(?:${namesAlt})>[\\s\\S]*?</(?:${namesAlt})>`, 'g'), '');
+      cleanText = cleanText.replace(new RegExp(`</(?:${namesAlt})>`, 'g'), '');
     }
     cleanText = cleanText.trim();
     return { functionCalls, cleanText };
@@ -1112,17 +1312,16 @@ export function mapOpenAIToGemini(
     const parts: GeminiPart[] = [];
     if (reasoningFromMessage) parts.push({ text: reasoningFromMessage, thought: true });
     for (const tc of choice.message.tool_calls) {
-      let args: ToolCallArgs;
-      try {
-        args =
-          typeof tc.function.arguments === 'string'
-            ? JSON.parse(tc.function.arguments)
-            : (tc.function.arguments as unknown as ToolCallArgs);
-      } catch (e) {
-        log.debug('[OpenAI] Tool call args parse fallback:', (e as Error).message);
-        args = {};
-      }
-      args = normalizeToolArgs(tc.function.name, args) as ToolCallArgs;
+      const rawArgs =
+        typeof tc.function.arguments === 'string'
+          ? tc.function.arguments
+          : JSON.stringify(tc.function.arguments ?? {});
+      const args = normalizeToolArgs(
+        tc.function.name,
+        parseNativeToolArgs(tc.function.name, rawArgs),
+      ) as ToolCallArgs;
+      // 坑 18：非流式 native tool_calls 路径同样保证 metadata 合法
+      sanitizeToolMetadata(tc.function.name, args as Record<string, unknown>);
       const modelTCIds = modelToolCallIds.get(stateKeyStr) || {};
       modelTCIds[tc.function.name] = tc.id;
       modelToolCallIds.set(stateKeyStr, modelTCIds);
@@ -1138,9 +1337,8 @@ export function mapOpenAIToGemini(
         });
         touchStateTimestamp(stateTimestamps.translatedCalls, tc.id);
       }
-      parts.push({
-        functionCall: { name: translated.name, args: translated.args as Record<string, unknown>, id: tc.id },
-      });
+      // 坑 25：非流式 native tool_calls 同样统一走 buildFunctionCallParts
+      parts.push(...buildFunctionCallParts([{ name: translated.name, args: translated.args as Record<string, unknown> }], stateKeyStr));
     }
     return {
       candidates: [{ content: { parts, role: 'model' }, finishReason: 'STOP', index: 0 }],
@@ -1152,32 +1350,16 @@ export function mapOpenAIToGemini(
     };
   }
 
-  const text = choice?.message?.content || '';
+  // 坑 17：非流式入口同样归一化全角竖线 DSML
+  const text = normalizeDSMLPipes(choice?.message?.content || '');
   const dsml = parseDSMLToolCalls(text, true, getLeanToolNames(stateKeyStr), modelToolSchemas.get(stateKeyStr) ?? null);
   if (dsml && dsml.functionCalls.length > 0) {
     const parts: GeminiPart[] = [];
     if (reasoningFromMessage) parts.push({ text: reasoningFromMessage, thought: true });
-    dsml.functionCalls.forEach((fc, i) => {
-      const na = normalizeToolArgs(fc.name, fc.args);
-      const tr = translateToolCallToNative(fc.name, na);
-      const callId = 'call_' + i + '_' + fc.name;
-      if (tr.name !== fc.name) {
-        tr.args = normalizeToolArgs(tr.name, tr.args) as Record<string, unknown>;
-        translatedToolCalls.set(callId, {
-          originalName: fc.name,
-          translatedName: tr.name,
-          cmd: (na.CommandLine as string) || '',
-          cwd: (na.Cwd as string) || '',
-        });
-        touchStateTimestamp(stateTimestamps.translatedCalls, callId);
-      }
-      const modelTCIds = modelToolCallIds.get(stateKeyStr) || {};
-      modelTCIds[fc.name] = callId;
-      modelToolCallIds.set(stateKeyStr, modelTCIds);
-      touchStateTimestamp(stateTimestamps.toolCallIds, stateKeyStr);
-      parts.push({ functionCall: { name: tr.name, args: tr.args as Record<string, unknown>, id: callId } });
-    });
-    if (dsml.cleanText) parts.unshift({ text: dsml.cleanText });
+    // 坑 25：非流式同样走 prompt-XML 文本交付（LS 只解析文本标记）；
+    // 经 buildFunctionCallParts 统一做翻译/注册/序列化。
+    if (dsml.cleanText) parts.push({ text: dsml.cleanText });
+    parts.push(...buildFunctionCallParts(dsml.functionCalls, stateKeyStr));
     return {
       candidates: [{ content: { parts, role: 'model' }, finishReason: 'STOP', index: 0 }],
       usageMetadata: {
@@ -1211,6 +1393,93 @@ export function mapOpenAIToGemini(
 
 // ─── STREAM CHUNK: OpenAI → Gemini ────────────────────────────────────────
 
+/**
+ * 坑 20 → 反证修正（坑 23）：官方对第三方模型（claude-sonnet-4-6）的调用帧
+ * 【没有 thoughtSignature】照样执行 —— LS 对缺失签名不做校验；而携带签名时
+ * LS 会验签，伪造的 Base64 串解不出合法结构 → 整个 part 判非法 → 调用丢弃
+ * （13:08/13:29 实测）。结论：签名宁缺勿假，彻底不注入。
+ * （原 withThoughtSignature/SYNTHETIC_THOUGHT_SIGNATURE 已移除。）
+ */
+
+/**
+ * 坑 18：IDE 工具 schema 将 toolSummary / toolAction 列为必填（LS 报错串
+ * "missing or invalid toolSummary in arguments"），官方 Gemini 帧的 args 也
+ * 始终携带（透传日志证实）。但第三方上游有两种失格形态：
+ *   ① 压根不输出（lean 裸标签格式，11:16 流）→ args 缺 required → LS 丢弃；
+ *   ② 输出了但值是乱码（商汤服务端对参数区中文做 GBK 双重编码，11:31 流，
+ *      "查看" → "鏌ョ湅"，甚至含 U+FFFD 截断符）→ "invalid" → LS 丢弃。
+ * 交付前统一保证两键存在且值合法；缺失或含乱码特征（U+FFFD / 假名 / 全角
+ * 拉丁 / GBK 双重解码高频字）时用官方风格英文短描述合成。
+ */
+const METADATA_MOJIBAKE_RE =
+  /[\uFFFD\u3040-\u30FF\uFF01-\uFF5E\u20AC]|^[\u93cc\u92b6\u59dd\u8be9\u9473\u93de\u6d0b\u93c2\u6d5a\u946b]/;
+
+const METADATA_DEFAULT_SUMMARY: Record<string, string> = {
+  run_command: 'Running command',
+  view_file: 'Viewing file',
+  list_dir: 'Listing directory',
+  grep_search: 'Searching code',
+  write_to_file: 'Writing file',
+  replace_file_content: 'Editing file',
+  web_search: 'Searching web',
+  find_by_name: 'Finding files',
+};
+
+export function sanitizeToolMetadata(name: string, args: Record<string, unknown>): void {
+  const isBad = (v: unknown): boolean => typeof v !== 'string' || !v.trim() || METADATA_MOJIBAKE_RE.test(v);
+  if (isBad(args.toolSummary)) {
+    args.toolSummary = METADATA_DEFAULT_SUMMARY[name] ?? `Calling ${name}`;
+  }
+  if (isBad(args.toolAction)) {
+    args.toolAction = METADATA_DEFAULT_SUMMARY[name] ?? `Calling ${name}`;
+  }
+  // WaitMsBeforeAsync：官方 run_command 帧带数值（观察值 5000）；缺失或类型不符时补齐
+  if (name === 'run_command' && typeof args.WaitMsBeforeAsync !== 'number') {
+    args.WaitMsBeforeAsync = 5000;
+  }
+}
+
+/**
+ * 坑 25（范式修正）：将解析出的文本工具调用交付为【prompt-XML 文本 part】，
+ * 而非 functionCall part。LS 对自定义模型（占位符）一律走 prompt-based 工具
+ * 调用：工具定义在 systemInstruction 文本里，响应侧 LS 只解析
+ * <tool_name>{json}</tool_name> 文本块，functionCall part 会被忽略（这正是
+ * 此前 supportsToolCalls/拆帧/签名全链修复均无效的根因）。
+ *
+ * 反向映射状态（translatedToolCalls / modelToolCallIds）照常注册，保证下游
+ * 兼容；文本块按 prompt 要求分组置于消息末尾（由收口帧统一 flush）。
+ */
+function buildFunctionCallParts(
+  fcs: { name: string; args: Record<string, unknown> }[],
+  stateKeyStr: string,
+): GeminiPart[] {
+  const pairs: { name: string; args: Record<string, unknown> }[] = [];
+  fcs.forEach((fc) => {
+    const na = normalizeToolArgs(fc.name, fc.args);
+    // 坑 18：toolSummary/toolAction 缺失或乱码时合成合法值（LS 必填校验）
+    sanitizeToolMetadata(fc.name, na);
+    const tr = translateToolCallToNative(fc.name, na);
+    const callId = generateSyntheticCallId();
+    if (tr.name !== fc.name) {
+      tr.args = normalizeToolArgs(tr.name, tr.args) as Record<string, unknown>;
+      translatedToolCalls.set(callId, {
+        originalName: fc.name,
+        translatedName: tr.name,
+        cmd: (na.CommandLine as string) || '',
+        cwd: (na.Cwd as string) || '',
+      });
+      touchStateTimestamp(stateTimestamps.translatedCalls, callId);
+    }
+    const modelTCIds = modelToolCallIds.get(stateKeyStr) || {};
+    modelTCIds[fc.name] = callId;
+    modelToolCallIds.set(stateKeyStr, modelTCIds);
+    touchStateTimestamp(stateTimestamps.toolCallIds, stateKeyStr);
+    pairs.push({ name: tr.name, args: tr.args as Record<string, unknown> });
+  });
+  if (pairs.length === 0) return [];
+  return [{ text: serializeToolCallsAsPromptXml(pairs) }];
+}
+
 export function mapOpenAIChunkToGemini(
   chunk: OpenAIResponse,
   modelName: string,
@@ -1242,9 +1511,18 @@ export function mapOpenAIChunkToGemini(
     }
   }
 
-  const text = delta?.content || '';
+  // 坑 17：帧文本入口即归一化全角竖线 DSML（`<｜DSML｜…>` → `<DSML|…>`），
+  // 保证 accumulatedText、holdback、块解析整条链路只处理 ASCII 形态。
+  const text = normalizeDSMLPipes(delta?.content || '');
   const reasoning = delta?.reasoning_content || delta?.reasoning || '';
   if (reasoning) context.accumulatedReasoning += reasoning;
+  // 坑 16：块解析消费后移出的半截标签（heldSuffixDetached）不在 accumulatedText
+  // 里，必须先补回再拼接本帧 text——后续 alreadyInsideToolBlock / bare 边界检测
+  // 都基于 accumulatedText，缺了这个 `<` 就会把下一块整段当纯文本泄漏。
+  if (text && context.pendingHeldSuffix && context.heldSuffixDetached) {
+    context.accumulatedText += context.pendingHeldSuffix;
+    delete context.heldSuffixDetached;
+  }
   if (text) context.accumulatedText += text;
 
   // While a tool-call block is only partially streamed, hold its raw markup
@@ -1269,9 +1547,27 @@ export function mapOpenAIChunkToGemini(
       // buffer so it is re-emitted verbatim at stream end (never duplicated or dropped).
       context.withheldText = (context.withheldText ?? '') + text;
     } else {
+      // Re-combine any partial marker suffix held from the previous chunk with
+      // this delta BEFORE marker detection. Otherwise a marker split across
+      // chunk boundaries (e.g. prev chunk ends with "<view", this chunk is
+      // "_file>") never matches a full marker and the remainder ("_file>")
+      // leaks as visible text — the old code searched only the current delta.
+      const heldSuffix = context.pendingHeldSuffix ?? '';
+      if (heldSuffix) {
+        // The held suffix was already buffered into withheldText; pull it back
+        // out so it is re-processed exactly once below (never duplicated).
+        const w = context.withheldText ?? '';
+        context.withheldText = w.slice(0, w.length - heldSuffix.length);
+        delete context.pendingHeldSuffix;
+      }
+      const work = heldSuffix + text;
+      // Position of work[0] within accumulatedText: the held suffix is the
+      // tail of prevAcc, so work starts heldSuffix.length earlier than text.
+      const workBase = prevAcc.length - heldSuffix.length;
+
       let earliestIdx = -1;
       for (const marker of TOOL_CALL_START_MARKERS) {
-        const idx = text.indexOf(marker);
+        const idx = work.indexOf(marker);
         if (idx >= 0 && (earliestIdx === -1 || idx < earliestIdx)) {
           earliestIdx = idx;
         }
@@ -1280,22 +1576,27 @@ export function mapOpenAIChunkToGemini(
       // when they sit at a block boundary & outside a code fence. Match them
       // against the accumulated text so the boundary test sees the whole stream
       // so far (prevAcc + this delta).
-      const bareIdx = nativeSeen ? -1 : findEarliestBareMarkerIdx(context.accumulatedText, text, prevAcc.length, leanToolNames);
+      const bareIdx = nativeSeen ? -1 : findEarliestBareMarkerIdx(context.accumulatedText, work, workBase, leanToolNames);
       if (bareIdx >= 0 && (earliestIdx === -1 || bareIdx < earliestIdx)) earliestIdx = bareIdx;
 
-      let safePrefix = earliestIdx >= 0 ? text.slice(0, earliestIdx) : text;
+      let safePrefix = earliestIdx >= 0 ? work.slice(0, earliestIdx) : work;
       if (earliestIdx === -1) {
         // A tool-call marker may be split across chunk boundaries (e.g. chunk
         // ends with "<tool_" and the next chunk starts with "call>"). Hold back
-        // the trailing partial-marker suffix (standard markers + bare open tags)
-        // so it never leaks as visible text; it stays in accumulatedText and is
-        // re-evaluated with the next delta.
-        const markers = [...TOOL_CALL_START_MARKERS, ...leanToolNames.map((n) => `<${n}>`)];
+        // the trailing partial-marker suffix (standard markers + bare open AND
+        // closing tags — a lone "</view" tail would leak the same way) so it
+        // never leaks as visible text; it is re-combined with the next delta
+        // via the heldSuffix path above.
+        const markers = [
+          ...TOOL_CALL_START_MARKERS,
+          ...leanToolNames.map((n) => `<${n}>`),
+          ...leanToolNames.map((n) => `</${n}>`),
+        ];
         let holdLen = 0;
         for (const marker of markers) {
-          const maxCheck = Math.min(marker.length - 1, text.length);
+          const maxCheck = Math.min(marker.length - 1, work.length);
           for (let len = maxCheck; len > holdLen; len--) {
-            if (text.endsWith(marker.slice(0, len))) {
+            if (work.endsWith(marker.slice(0, len))) {
               holdLen = len;
               break;
             }
@@ -1303,7 +1604,7 @@ export function mapOpenAIChunkToGemini(
         }
         if (holdLen > 0) {
           safePrefix = safePrefix.slice(0, safePrefix.length - holdLen);
-          context.pendingHeldSuffix = text.slice(text.length - holdLen);
+          context.pendingHeldSuffix = work.slice(work.length - holdLen);
           context.withheldText = (context.withheldText ?? '') + context.pendingHeldSuffix;
         } else {
           delete context.pendingHeldSuffix;
@@ -1311,76 +1612,94 @@ export function mapOpenAIChunkToGemini(
       } else {
         // Truncated at a bare/standard tool-call marker: the remainder after the
         // marker was never emitted, so buffer it for verbatim re-emission.
-        context.withheldText = (context.withheldText ?? '') + text.slice(earliestIdx);
+        context.withheldText = (context.withheldText ?? '') + work.slice(earliestIdx);
       }
-      if (safePrefix) emitParts.push({ text: safePrefix });
+      // 坑 17 后续：已被消费的块遗留的孤儿 DSML 结构标签（真实 11:25 流收口后
+      // 又来了两个多余的 `</DSML|tool_call>`）在后续帧走 safePrefix 路径。工具
+      // 调用标记任何情况下不得作为可见正文发出，发射前过滤。
+      const visiblePrefix = safePrefix.replace(/<\/?DSML\|[^>]*>/g, '');
+      if (visiblePrefix) emitParts.push({ text: visiblePrefix });
     }
   }
 
-  // If this stream already emitted a TOOL_CALL, suppress subsequent STOP/OTHER chunks so tool call is not cancelled
-  if (context.hasEmittedToolCall) {
-    if (choice.finish_reason === 'stop' || choice.finish_reason === 'length' || choice.finish_reason === 'tool_calls' || choice.finish_reason === 'function_call') {
-      activeStreamContexts.delete(streamId);
-    }
-    return null;
-  }
-
-  // Intermediate closed-block parsing (only closed tool call blocks)
+  // Intermediate closed-block parsing (only closed tool call blocks). Parsed
+  // calls are STASHED into context.pendingFunctionCallParts instead of being
+  // emitted immediately: delivering each call as its own STOP-terminated
+  // message made the IDE treat the first STOP as end-of-turn and fall back to
+  // its built-in model, silently dropping every later call (real-world
+  // deepseek-v4-flash: view_file then run_command in one stream). All pending
+  // calls are flushed together on the terminal frame below — one candidate,
+  // multiple functionCall parts, a single STOP.
   const dsml = parseDSMLToolCalls(context.accumulatedText, false, leanToolNames, leanParamSchemas);
   if (dsml && dsml.functionCalls.length > 0) {
-    const parts: GeminiPart[] = [];
-    if (reasoning) parts.push({ text: reasoning, thought: true });
-    dsml.functionCalls.forEach((fc, i) => {
-      const na = normalizeToolArgs(fc.name, fc.args);
-      const tr = translateToolCallToNative(fc.name, na);
-      const callId = 'call_' + i + '_' + fc.name;
-      if (tr.name !== fc.name) {
-        tr.args = normalizeToolArgs(tr.name, tr.args) as Record<string, unknown>;
-        translatedToolCalls.set(callId, {
-          originalName: fc.name,
-          translatedName: tr.name,
-          cmd: (na.CommandLine as string) || '',
-          cwd: (na.Cwd as string) || '',
-        });
-        touchStateTimestamp(stateTimestamps.translatedCalls, callId);
-      }
-      const modelTCIds = modelToolCallIds.get(stateKeyStr) || {};
-      modelTCIds[fc.name] = callId;
-      modelToolCallIds.set(stateKeyStr, modelTCIds);
-      touchStateTimestamp(stateTimestamps.toolCallIds, stateKeyStr);
-      parts.push({ functionCall: { name: tr.name, args: tr.args as Record<string, unknown>, id: callId } });
-    });
-    context.accumulatedText = '';
-    context.withheldText = '';
+    context.pendingFunctionCallParts = [
+      ...(context.pendingFunctionCallParts ?? []),
+      ...buildFunctionCallParts(dsml.functionCalls, stateKeyStr),
+    ];
+    // Keep the unparsed remainder (e.g. a partially-streamed NEXT call block)
+    // instead of wiping everything — a second call may already be in flight.
+    // The trailing newline is required: cleanText strips the newlines adjacent
+    // to the consumed block, and a following bare tag must still sit at a
+    // line-start boundary to be recognised (real-world regression: view_file
+    // then run_command in one stream, the second call silently dropped).
+    //
+    // 坑 16：上游可能把下一个块的开标签拆成 `<` + `run_command>` 跨 chunk 发送
+    // （真实 10:52 流：`</`+`view_file>`+`\n<` | `run_command>`）。块解析消费后，
+    // cleanText 尾部会残留孤立 `<`，补 \n 后变成 `<\n`，下一帧 `run_command>`
+    // 拼不回 `<run_command>`，行首 bare 检测失败 → 整块泄漏为可见文本且第二个
+    // 调用丢失。把这种"半截标签"尾从 cleanText 移入 pendingHeldSuffix，走下方
+    // 既有 heldSuffix 重拼通道与下一帧重拼。
+    let cleanTail = dsml.cleanText ?? '';
+    const tailHold = trailingPartialMarkerLen(cleanTail, leanToolNames);
+    if (tailHold > 0) {
+      context.pendingHeldSuffix = cleanTail.slice(cleanTail.length - tailHold);
+      cleanTail = cleanTail.slice(0, cleanTail.length - tailHold);
+      // 坑 16：这个 heldSuffix 已从 accumulatedText 移出（不是老式"原地扣留"），
+      // 打上分离标记，下一帧重拼前先补回 accumulatedText。
+      context.heldSuffixDetached = true;
+      // 与 1385-1391 的重拼约定一致：heldSuffix 已计入 withheldText，下一帧从
+      // withheldText 拉回后正好消费一次。
+      context.withheldText = context.pendingHeldSuffix;
+    } else {
+      delete context.pendingHeldSuffix;
+      delete context.heldSuffixDetached;
+      context.withheldText = '';
+    }
+    context.accumulatedText = cleanTail && !cleanTail.endsWith('\n') ? cleanTail + '\n' : cleanTail;
     context.hasEmittedToolCall = true;
-    // If this frame is terminal (carries a finish_reason), no later frame will
-    // reach the hasEmittedToolCall cleanup below, so free the stream context now
-    // (RC8) to avoid leaking it into the next stream with the same id.
-    if (choice.finish_reason) activeStreamContexts.delete(streamId);
-    return { content: { parts, role: 'model' }, finishReason: 'STOP', index: 0 };
   }
 
   const finishReason = choice.finish_reason;
-  if (finishReason === 'stop' || finishReason === 'length' || finishReason === 'function_call') {
+  const isTerminal = finishReason === 'stop' || finishReason === 'length' || finishReason === 'function_call';
+  if (isTerminal) {
     // Check for pending native tool_calls before closing stream
     // A tool call with empty arguments ("{}"/"") is still a valid no-arg call —
     // don't filter it out (JSON.parse falls back to {} below).
     const pendingToolCalls = Object.values(context.toolCalls).filter((tc) => tc.name);
     if (pendingToolCalls.length > 0) {
-      const parts: GeminiPart[] = emitParts.slice();
+      // Text-tag calls stashed earlier in this stream are delivered together
+      // with the native ones — one candidate, single STOP.
+      const parts: GeminiPart[] = [...emitParts, ...(context.pendingFunctionCallParts ?? [])];
       // 补丁2（细化）：原生收口的调用来自 delta.tool_calls，与被扣留文本无关。
       // 纯文本开头的扣留是误扣正文 → 随本帧原样补发，不再丢失（回归 A 收口丢失面）；
-      // 标记开头的扣留是被原生调用取代的废弃调用块 → 维持丢弃，不泄漏为正文（d2 语义）。
+      // 标记开头的扣留是被原生调用取代的废弃调用块 → 标记本身不泄漏（d2 语义），
+      // 但块后的残余正文经 salvage 抢救补发，不再整体丢弃（h4/h5 语义）。
       const held = context.withheldText;
-      if (held && !withheldStartsWithMarkup(held)) parts.unshift({ text: held });
-      for (const tc of pendingToolCalls) {
-        let args: ToolCallArgs = {};
-        try {
-          args = JSON.parse(tc.arguments);
-        } catch (_e) {
-          args = {};
+      if (held) {
+        if (!withheldStartsWithMarkup(held)) {
+          parts.unshift({ text: held });
+        } else {
+          const salvaged = salvagePlainTextFromMarkupLedHeld(held, leanToolNames, leanParamSchemas);
+          if (salvaged) parts.unshift({ text: salvaged });
         }
-        args = normalizeToolArgs(tc.name, args) as ToolCallArgs;
+      }
+      for (const tc of pendingToolCalls) {
+        const args = normalizeToolArgs(
+          tc.name,
+          parseNativeToolArgs(tc.name, tc.arguments),
+        ) as ToolCallArgs;
+        // 坑 18：流式 native tool_calls 收口路径同样保证 metadata 合法
+        sanitizeToolMetadata(tc.name, args as Record<string, unknown>);
         const modelTCIds = modelToolCallIds.get(stateKeyStr) || {};
         modelTCIds[tc.name] = tc.id;
         modelToolCallIds.set(stateKeyStr, modelTCIds);
@@ -1395,9 +1714,8 @@ export function mapOpenAIChunkToGemini(
           });
           touchStateTimestamp(stateTimestamps.translatedCalls, tc.id);
         }
-        parts.push({
-          functionCall: { name: translated.name, args: translated.args as Record<string, unknown>, id: tc.id },
-        });
+        // 坑 25：流式 native 收口统一走 buildFunctionCallParts
+        parts.push(...buildFunctionCallParts([{ name: translated.name, args: translated.args as Record<string, unknown> }], stateKeyStr));
       }
       context.hasEmittedToolCall = true;
       activeStreamContexts.delete(streamId);
@@ -1407,27 +1725,8 @@ export function mapOpenAIChunkToGemini(
     if (context.accumulatedText) {
       const dsml2 = parseDSMLToolCalls(context.accumulatedText, true, leanToolNames, leanParamSchemas);
       if (dsml2 && dsml2.functionCalls.length > 0) {
-        const parts: GeminiPart[] = emitParts.slice();
-        dsml2.functionCalls.forEach((fc, i) => {
-          const na = normalizeToolArgs(fc.name, fc.args);
-          const tr = translateToolCallToNative(fc.name, na);
-          const callId = 'call_' + i + '_' + fc.name;
-          if (tr.name !== fc.name) {
-            tr.args = normalizeToolArgs(tr.name, tr.args) as Record<string, unknown>;
-            translatedToolCalls.set(callId, {
-              originalName: fc.name,
-              translatedName: tr.name,
-              cmd: (na.CommandLine as string) || '',
-              cwd: (na.Cwd as string) || '',
-            });
-            touchStateTimestamp(stateTimestamps.translatedCalls, callId);
-          }
-          const modelTCIds = modelToolCallIds.get(stateKeyStr) || {};
-          modelTCIds[fc.name] = callId;
-          modelToolCallIds.set(stateKeyStr, modelTCIds);
-          touchStateTimestamp(stateTimestamps.toolCallIds, stateKeyStr);
-          parts.push({ functionCall: { name: tr.name, args: tr.args as Record<string, unknown>, id: callId } });
-        });
+        const parts: GeminiPart[] = [...emitParts, ...(context.pendingFunctionCallParts ?? [])];
+        parts.push(...buildFunctionCallParts(dsml2.functionCalls, stateKeyStr));
         context.hasEmittedToolCall = true;
         activeStreamContexts.delete(streamId);
         return { content: { parts, role: 'model' }, finishReason: 'STOP', index: 0 };
@@ -1442,6 +1741,14 @@ export function mapOpenAIChunkToGemini(
     if (held) emitParts.push({ text: held });
     delete context.pendingHeldSuffix;
     context.withheldText = '';
+    // Deliver any stashed text-tag calls even when the final frame carries none
+    // (e.g. all calls already closed mid-stream): one candidate, single STOP.
+    const pendingNow = context.pendingFunctionCallParts ?? [];
+    if (pendingNow.length > 0) {
+      const parts: GeminiPart[] = [...emitParts, ...pendingNow];
+      activeStreamContexts.delete(streamId);
+      return { content: { parts, role: 'model' }, finishReason: 'STOP', index: 0 };
+    }
     activeStreamContexts.delete(streamId);
     return {
       content: { parts: emitParts, role: 'model' },
@@ -1452,19 +1759,25 @@ export function mapOpenAIChunkToGemini(
 
   // Only emit tool calls when finishReason signals completion (args are fully accumulated)
   if (finishReason === 'tool_calls') {
-    const parts: GeminiPart[] = emitParts.slice();
-    // 补丁2（细化）：同上，纯文本开头的扣留随调用帧补发；标记开头的废弃块不泄漏。
+    const parts: GeminiPart[] = [...emitParts, ...(context.pendingFunctionCallParts ?? [])];
+    // 补丁2（细化）：同上，纯文本开头的扣留随调用帧补发；标记开头的废弃块不泄漏，
+    // 但其残余正文经 salvage 抢救补发。
     const held = context.withheldText;
-    if (held && !withheldStartsWithMarkup(held)) parts.unshift({ text: held });
-    for (const tc of Object.values(context.toolCalls)) {
-      let args: ToolCallArgs = {};
-      try {
-        args = JSON.parse(tc.arguments);
-      } catch (e) {
-        log.debug('[OpenAI] Stream tool args parse fallback:', (e as Error).message);
-        args = {};
+    if (held) {
+      if (!withheldStartsWithMarkup(held)) {
+        parts.unshift({ text: held });
+      } else {
+        const salvaged = salvagePlainTextFromMarkupLedHeld(held, leanToolNames, leanParamSchemas);
+        if (salvaged) parts.unshift({ text: salvaged });
       }
-      args = normalizeToolArgs(tc.name, args) as ToolCallArgs;
+    }
+    for (const tc of Object.values(context.toolCalls)) {
+      const args = normalizeToolArgs(
+        tc.name,
+        parseNativeToolArgs(tc.name, tc.arguments),
+      ) as ToolCallArgs;
+      // 坑 18：流式 native 收口路径（无文本调用）同样保证 metadata 合法
+      sanitizeToolMetadata(tc.name, args as Record<string, unknown>);
       const modelTCIds = modelToolCallIds.get(stateKeyStr) || {};
       modelTCIds[tc.name] = tc.id;
       modelToolCallIds.set(stateKeyStr, modelTCIds);
@@ -1480,9 +1793,8 @@ export function mapOpenAIChunkToGemini(
         });
         touchStateTimestamp(stateTimestamps.translatedCalls, tc.id);
       }
-      parts.push({
-        functionCall: { name: translated.name, args: translated.args as Record<string, unknown>, id: tc.id },
-      });
+      // 坑 25：finishReason=tool_calls 收口统一走 buildFunctionCallParts
+      parts.push(...buildFunctionCallParts([{ name: translated.name, args: translated.args as Record<string, unknown> }], stateKeyStr));
     }
     context.hasEmittedToolCall = true;
     activeStreamContexts.delete(streamId);

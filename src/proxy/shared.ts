@@ -15,6 +15,28 @@ export interface StreamContext {
   pendingHeldSuffix?: string;
   /** Body text withheld by the emitter (inside an in-flight tool block, or a truncated marker remainder). Flushed verbatim at stream end so it is never duplicated or dropped. */
   withheldText?: string;
+  /**
+   * Text-tag tool calls parsed from closed blocks mid-stream, held until the
+   * upstream finish frame so they can be delivered as ONE candidate message
+   * (multiple functionCall parts + a single STOP). Emitting each call as its
+   * own STOP-terminated message made the IDE treat the first STOP as turn end
+   * and fall back to its built-in model, silently dropping the rest.
+   */
+  pendingFunctionCallParts?: GeminiPartLite[];
+  /**
+   * 坑 16：标记 pendingHeldSuffix 是"从 accumulatedText 中移出"的半截标签
+   * （块解析消费后残留的孤立 `<` 等），而非"仍在 accumulatedText 尾部"的
+   * 老式部分标记。下一帧重拼前需先把 heldSuffix 补回 accumulatedText，
+   * 使 prevAcc/workBase 映射与 work 保持一致。
+   */
+  heldSuffixDetached?: boolean;
+}
+
+/** Minimal shape of a Gemini part pending delivery (kept structural to avoid import cycles). */
+export interface GeminiPartLite {
+  functionCall?: { name: string; args: Record<string, unknown>; id?: string };
+  text?: string;
+  thought?: boolean;
 }
 
 export interface StateTimestamps {
@@ -60,6 +82,22 @@ export function stateKey(modelName: string, sessionId?: string): string {
 
 /** stateKey(modelName, sessionId) → { "functionName": "original_tool_call_id" } */
 export const modelToolCallIds = new Map<string, Record<string, string>>();
+
+/**
+ * 生成与原生 Gemini（Antigravity LS）兼容的工具调用 id：`call_` + 纯数字。
+ *
+ * 实测对照（2026-09-04 10:15 会话）：LS 会话轨迹中成功执行的调用 id 均为
+ * `call_` + 纯数字（如 call_717295，由 Google 官方后端下发）；此前代理在
+ * 文本标签路径合成的 `call_0_view_file` 形态会导致 LS 丢弃整个 functionCall
+ * （帧已送达但工具不执行、会话库无该调用记录、随后回退内置模型）。
+ * 回程映射（functionResponse → tool_call_id）依赖 modelToolCallIds /
+ * pendingCallsQueue 兜底，与 id 字面格式无关，纯数字格式是安全的。
+ */
+let syntheticCallIdCounter = 0;
+export function generateSyntheticCallId(): string {
+  syntheticCallIdCounter = (syntheticCallIdCounter + 1) % 1000;
+  return 'call_' + (Date.now() % 1000000000).toString() + String(syntheticCallIdCounter).padStart(3, '0');
+}
 
 /** stateKey(modelName, sessionId) → preserved reasoning_content from previous turn */
 export const modelReasoningContent = new Map<string, string>();
