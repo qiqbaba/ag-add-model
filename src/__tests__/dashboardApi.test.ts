@@ -114,7 +114,7 @@ describe('Dashboard and REST API endpoints', () => {
     const res = await makeRequest('GET', '/');
     expect(res.statusCode).toBe(200);
     expect(res.headers['content-type']).toContain('text/html');
-    expect(res.body).toContain('Antigravity Models');
+    expect(res.body).toMatch(/Antigravity (Models|IDE 自定义模型)/);
     expect(res.body).toContain('快速预设模板');
   });
 

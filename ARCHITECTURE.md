@@ -131,6 +131,14 @@ antigravity-add-model/
 * **Anthropic 兼容协议族**（`anthropic`, `deepseek`, `kimi`, `fireworks`, `lmstudio`, `llamacpp`, `wafer`, `zai`）：统一路由至 `anthropic.ts` 转换器，映射 `system`、`tool_use`、`content_block_delta`、extended thinking 块，以及图像输入（`type: "image"` base64 内容块）。
 * **Google AI Studio 协议**（`google`）：原生 Gemini 格式透传，动态根据流式状态挂载 `:streamGenerateContent` 或 `:generateContent`。
 
+> [!CAUTION]
+> **真实平台验证范围重要说明**：
+> 虽然上述多协议翻译架构保留了上游代码对多个主流平台的协议转换逻辑，但**在当前项目中，真正接入、深度联调并完整实测验证可用的仅为本地已添加的平台**：
+> 1. **商汤日日新 SenseNova**（`token.sensenova.cn` / `api.sensenova.cn`，使用 `openai` 转换器）：已完整实测验证商汤 V4 Flash、SenseNova 6.8 Flash Lite、GLM 5.2、Deepseek V4 Pro、Kimi K3 等模型，深度攻克了 DSML 标签、全角竖线 ｜、XML 裸标签与参数解析、GBK 乱码合成以及 prompt-XML 工具调用（坑 12~25）等复杂问题；
+> 2. **智源 / 蜂动 B.AI**（`api.b.ai`，使用 `openai` 转换器）：已实测验证 Hy3、GLM 5.3 Flash、Qwen3.8 Flash、Mimo V2.5 等模型。
+>
+> **除上述本地已添加平台外，其余所有平台（如 OpenAI 官方、Anthropic 官方、Google AI Studio、Ollama 本地、OpenRouter 聚合等）在本项目中均未经任何测试与验证**，其连通性、流式分块粘包及最为关键的 Agent 工具调用等特性无法保证正常可用，使用时需做好自行排查和修复的准备。
+
 ---
 
 ## 二、Cloud Code 内部 API 逆向与协议转换
@@ -759,4 +767,5 @@ OpenAI 兼容自定义模型（`openai` / `custom` / `openrouter` / `ollama` 等
 3. **名称关键字过滤（已解除）**：早期版本自定义模型的 `displayName` 含 `flash`/`lite`/`pro`/`low`/`high`/`tier` 等分级词汇会被前关键词清洗为 `fx`/`pr0` 等变体。现注入条目已补齐完整元数据且 `thinkingLevel: 0`，显示名称与 slug 均**原样透传**，不再清洗，也不会再被分级过滤（见 [坑 7](#坑-7字段缺失导致官方-lowmediumhigh-子菜单-nan-崩溃)）。
 4. **同名上游模型 id**：不同提供商的模型若 `externalModelName` 相同，`toSlug()` 已按 `displayName` 优先生成互不相同的 slug（见 [坑 10](#坑-10多自定义模型仅显示-n-1-个同名-slug-覆写)），但**同一配置内 `displayName` 不宜重复**，否则仍会因 slug 冲突而丢失模型。
 5. **图像输入取决于模型视觉能力**：代理会正确构造 `image_url` / `type: "image"` 结构（见 [2.7 节](#27-多模态视觉vision-输入处理)），但图像能否被“看见”仍取决于所用模型是否支持视觉。对不支持图像的模型（如部分 DeepSeek、Llama 文本模型），图像内容块可能被上游忽略或报错。
+6. **平台验证范围限制（仅本地已添加平台实测通过）**：文档与上游代码中虽然记录了支持 OpenAI、Anthropic、Ollama、Google AI Studio 等众多平台并保留了协议翻译逻辑，但**除本地已添加平台（商汤 SenseNova、智源/蜂动 B.AI）外，其他所有平台均未经任何实际联调与验证**。目前仅有本地添加的平台经过了深度的端到端实测验证（包括流式分块、DSML 解析、全角竖线容错、GBK 乱码合成以及至关重要的 prompt-XML 工具调用等 25 个坑的修复）。若用户或开发者自行接入其他未经验证的平台，极有可能遇到工具不执行、回复截断或协议 400 等未知问题，需做好自行排查与二次适配的准备。
 

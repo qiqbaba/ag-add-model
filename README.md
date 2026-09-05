@@ -1,14 +1,16 @@
 > 本方案仅针对 **Antigravity IDE 独立版**（VS Code Fork，解包式 `resources\app`）测试验证，其他安装形态未测试，效果未知。
-
-项目是在[vahapogut/antigravity-add-model](https://github.com/vahapogut/antigravity-add-model)基础上进行的修改。
+>
+> ⚠️ **平台验证重要声明**：本项目由 [vahapogut/antigravity-add-model](https://github.com/vahapogut/antigravity-add-model) 二开改造而来。文档中记录着支持众多模型平台，但**实际上只有本地已添加的平台（商汤 SenseNova、智源/蜂动 B.AI）经过了完整联调实测并确认可正常稳定使用（含工具调用）；其他所有平台在本项目中均未经任何验证，效果未知**。
 
 # Antigravity 自定义模型启用器
 
 > **Antigravity IDE（VS Code Fork）部署方案**
 >
-> 本仓库为 **Antigravity IDE 独立版**（解包式 `resources\app`，VS Code Fork 架构）提供一键部署，可在内置 Gemini 模型之外启用外部 AI 模型（OpenAI、Anthropic、Ollama、Google AI Studio 以及任何 OpenAI 兼容的提供商，如 Together API）。
+> 本仓库为 **Antigravity IDE 独立版**（解包式 `resources\app`，VS Code Fork 架构）提供一键部署，可在内置 Gemini 模型之外启用外部 AI 模型。
 >
 > 它向 Electron 应用注入一个本地 HTTP 代理，逆向工程 Cloud Code 内部 API（`v1internal`），在各提供商格式之间翻译请求/响应，并通过 `custom_models.json` 配置实现外部模型无缝接入。
+>
+> **特别注意**：虽然代理代码中保留了上游的多协议翻译分支，但**只有本地已添加并深度适配的平台（商汤 SenseNova、B.AI）可以正常稳定使用**。其他未经测试验证的平台，在 Antigravity 的高标准要求（特别是 prompt-XML 工具调用、流式分块）下无法保证正常工作。
 
 ## 文档导航
 
@@ -71,48 +73,62 @@ npx tsc
 
 ---
 
-## 支持的提供商
+## 支持的提供商与平台验证状态
 
 你可以**同时配置来自不同提供商的多个模型**。它们会一并出现在 Antigravity 聊天界面的模型选择下拉列表中，可实时切换。
 
+> [!CAUTION]
+> **真实可用性与平台验证声明**：
+> 文档与代码中保留了上游声明的多个平台和协议转换分支，但**实际上只有本地已添加并深度适配的平台是可以正常稳定使用的，其他平台均未经任何测试与验证**！
+> 
+> Antigravity IDE 内部语言服务器（LS）对自定义模型的要求极为严苛（尤其是**工具调用 Tool Calls 仅识别模型响应文本中的 prompt-XML 格式，忽略原生 `functionCall`**，且对流式分块、标签闭合、参数编码敏感，详见 [ARCHITECTURE.md](./ARCHITECTURE.md) 坑 12~25）。**未经实际验证的平台极大概率会出现：工具调用不触发/被忽略、模型回答一句话后提前结束、流式卡死或报错 400 等严重问题**。
 
-| 提供商 | 格式 | 环境变量 / 密钥 | 默认 API URL |
-|---|---|---|---|
-| **OpenAI** | `openai` | `apiKey`（或 `OPENAI_API_KEY`） | `https://api.openai.com/v1/chat/completions` |
-| **Anthropic** | `anthropic` | `apiKey`（或 `ANTHROPIC_API_KEY`） | `https://api.anthropic.com/v1/messages` |
-| **OpenRouter** | `openrouter` | `apiKey`（OpenRouter API 密钥） | `https://openrouter.ai/api/v1/chat/completions` |
-| **Ollama**（本地） | `ollama` | *（无需）* | `http://localhost:11434/v1/chat/completions` |
-| **Google AI Studio** | `google` | `apiKey` *（Gemini API 密钥）* | `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent` |
-| **DeepSeek** | `deepseek` | `apiKey` | `https://api.deepseek.com/anthropic` |
-| **Groq** | `groq` | `apiKey` | `https://api.groq.com/openai/v1` |
-| **Mistral** | `mistral` | `apiKey` | `https://api.mistral.ai/v1` |
-| **Cerebras** | `cerebras` | `apiKey` | `https://api.cerebras.ai/v1` |
-| **Kimi（Moonshot）** | `kimi` | `apiKey` | `https://api.moonshot.ai/anthropic/v1` |
-| **Fireworks AI** | `fireworks` | `apiKey` | `https://api.fireworks.ai/inference/v1` |
-| **LM Studio**（本地） | `lmstudio` | *（无需）* | `http://localhost:1234/v1` |
-| **llama.cpp**（本地） | `llamacpp` | *（无需）* | `http://localhost:8080/v1` |
-| **NVIDIA NIM** | `nvidia` | `apiKey` | `https://integrate.api.nvidia.com/v1` |
-| **Codestral** | `codestral` | `apiKey` | `https://api.mistral.ai/v1` |
-| **opencode** | `opencode` | `apiKey` | 任意 OpenAI 兼容端点（opencode CLI 自带） |
-| **wafer** | `wafer` | `apiKey` | 任意 Anthropic 兼容端点 |
-| **zai** | `zai` | `apiKey` | 任意 Anthropic 兼容端点 |
-| **自定义**（OpenAI 兼容） | `custom` 或 `openai` | `apiKey` *（提供商 API 密钥）* | 任意 OpenAI 兼容端点 |
+### 1. 本地已实测验证可用平台（推荐使用）
+
+以下平台为本地已添加、经过真实流量与 Agent 完整链路联调验证，确认可正常稳定使用的平台：
+
+| 提供商 / 平台 | 协议格式（`provider`） | 常用端点（`apiUrl`） | 本地已验证模型示例 | 验证说明与适配特性 |
+|---|---|---|---|---|
+| **商汤日日新 SenseNova** | `openai` | `https://token.sensenova.cn/v1/chat/completions`<br>或 `https://api.sensenova.cn/v1/llm/chat-completions` | 商汤 V4 Flash (`deepseek-v4-flash`)、SenseNova 6.8 Flash Lite (`sensenova-6.8-flash-lite`)、GLM 5.2 (`glm-5.2`)、Deepseek V4 Pro (`deepseek-v4-pro`)、Kimi K3 (`kimi-k3`) 等 | **✅ 已实测验证可用**<br>已深度适配 DSML 容器、全角竖线（`｜`）、XML 裸标签与 `Param` 嵌套参数解析、GBK 乱码合成修复及 prompt-XML 工具调用（坑 12~25），Agent 工具与流式稳定跑通。 |
+| **智源 / 蜂动 B.AI** | `openai` | `https://api.b.ai/v1/chat/completions` | Hy3 (`hy3`)、GLM 5.3 Flash (`glm-5.3-flash`)、Qwen3.8 Flash (`qwen3.8-flash`)、Mimo V2.5 (`mimo-v2.5`) 等 | **✅ 已实测验证可用**<br>标准 OpenAI 协议兼容良好，XML 裸标签与参数解析正常，工具调用已真实验证通过。 |
+
+---
+
+### 2. 其他提供商（上游声明，未经任何验证）
+
+以下列表源自上游开源项目（vahapogut/antigravity-add-model）的原始代码实现。**在本项目中未经任何实际测试与验证，效果完全未知，无法保证正常可用**。若需使用，请做好自行抓包、适配与排查故障的准备：
+
+| 提供商 | 格式（`provider`） | 环境变量 / 密钥 | 默认 API URL | 验证状态 |
+|---|---|---|---|---|
+| **OpenAI** | `openai` | `apiKey`（或 `OPENAI_API_KEY`） | `https://api.openai.com/v1/chat/completions` | ⚠️ **未经任何验证** |
+| **Anthropic** | `anthropic` | `apiKey`（或 `ANTHROPIC_API_KEY`） | `https://api.anthropic.com/v1/messages` | ⚠️ **未经任何验证** |
+| **OpenRouter** | `openrouter` | `apiKey`（OpenRouter API 密钥） | `https://openrouter.ai/api/v1/chat/completions` | ⚠️ **未经任何验证** |
+| **Ollama**（本地） | `ollama` | *（无需）* | `http://localhost:11434/v1/chat/completions` | ⚠️ **未经任何验证** |
+| **Google AI Studio** | `google` | `apiKey` *（Gemini API 密钥）* | `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent` | ⚠️ **未经任何验证** |
+| **DeepSeek（官方）** | `deepseek` | `apiKey` | `https://api.deepseek.com/anthropic` | ⚠️ **未经任何验证** |
+| **Groq** | `groq` | `apiKey` | `https://api.groq.com/openai/v1` | ⚠️ **未经任何验证** |
+| **Mistral** | `mistral` | `apiKey` | `https://api.mistral.ai/v1` | ⚠️ **未经任何验证** |
+| **Cerebras** | `cerebras` | `apiKey` | `https://api.cerebras.ai/v1` | ⚠️ **未经任何验证** |
+| **Kimi（Moonshot 官方）** | `kimi` | `apiKey` | `https://api.moonshot.ai/anthropic/v1` | ⚠️ **未经任何验证** |
+| **Fireworks AI** | `fireworks` | `apiKey` | `https://api.fireworks.ai/inference/v1` | ⚠️ **未经任何验证** |
+| **LM Studio**（本地） | `lmstudio` | *（无需）* | `http://localhost:1234/v1` | ⚠️ **未经任何验证** |
+| **llama.cpp**（本地） | `llamacpp` | *（无需）* | `http://localhost:8080/v1` | ⚠️ **未经任何验证** |
+| **NVIDIA NIM** | `nvidia` | `apiKey` | `https://integrate.api.nvidia.com/v1` | ⚠️ **未经任何验证** |
+| **Codestral** | `codestral` | `apiKey` | `https://api.mistral.ai/v1` | ⚠️ **未经任何验证** |
+| **opencode** | `opencode` | `apiKey` | 任意 OpenAI 兼容端点（opencode CLI 自带） | ⚠️ **未经任何验证** |
+| **wafer** | `wafer` | `apiKey` | 任意 Anthropic 兼容端点 | ⚠️ **未经任何验证** |
+| **zai** | `zai` | `apiKey` | 任意 Anthropic 兼容端点 | ⚠️ **未经任何验证** |
+| **自定义**（OpenAI 兼容） | `custom` 或 `openai` | `apiKey` *（提供商 API 密钥）* | 任意 OpenAI 兼容端点 | ⚠️ **未经任何验证** |
 
 > [!IMPORTANT]
-> **第三方模型平台（商汤 SenseNova、硅基流动 SiliconFlow、阿里百炼 DashScope、智谱 AI 等）配置须知**：
-> 在 `custom_models.json` 中，`provider` 字段指的是**协议翻译器类型**，而非厂商品牌名。只要平台提供的是标准 OpenAI 兼容的 `/v1/chat/completions` 接口，`provider` **必须填写 `"openai"` 或 `"custom"`**，切勿填写 `"SenseNova"` 等自定义名称，否则代理将无法识别协议类型并导致请求透传报错 400（详见 [ARCHITECTURE.md](./ARCHITECTURE.md) 坑 9）。
+> **第三方模型平台配置协议须知**：
+> 在 `custom_models.json` 中，`provider` 字段指的是**协议翻译器类型**，而非厂商品牌名。只要平台提供的是标准 OpenAI 兼容的 `/v1/chat/completions` 接口，`provider` **必须填写 `"openai"` 或 `"custom"`**，切勿填写 `"SenseNova"` 等自定义厂商名，否则代理将无法识别协议类型并导致请求透传报错 400（详见 [ARCHITECTURE.md](./ARCHITECTURE.md) 坑 9）。
 
 > [!NOTE]
-> **URL 自动补全**：对于 `openai`、`custom`、`openrouter` 三种 provider，以 `/v1` 结尾的 URL 会自动追加 `/chat/completions`，否则自动补齐 `/v1/chat/completions`。它与 Together AI、OpenRouter 及任何 OpenAI 兼容端点完全兼容。**注意**：该自动补全**仅**对上述三种 provider 生效——`groq`、`mistral`、`cerebras`、`nvidia`、`codestral`、`opencode` 等其他 OpenAI 兼容 provider 不会触发自动追加，填写这些 provider 的 `apiUrl` 时需带上完整的 `/chat/completions` 路径。（`ollama` 的 URL 规范化在 `translators/ollama.ts` 中独立实现。）
+> **URL 自动补全**：对于 `openai`、`custom`、`openrouter` 三种 provider，以 `/v1` 结尾的 URL 会自动追加 `/chat/completions`，否则自动补齐 `/v1/chat/completions`。**注意**：该自动补全**仅**对上述三种 provider 生效——`groq`、`mistral`、`cerebras`、`nvidia`、`codestral`、`opencode` 等其他 OpenAI 兼容 provider 不会触发自动追加，填写这些 provider 的 `apiUrl` 时需带上完整的 `/chat/completions` 路径。（`ollama` 的 URL 规范化在 `translators/ollama.ts` 中独立实现。）
 
 > [!NOTE]
-> **OpenRouter** 通过单一 API 提供对 300+ 模型（OpenAI、Anthropic、Google、Meta、DeepSeek 等）的统一访问。它使用 OpenAI 兼容格式，带 Bearer token 鉴权，并可选 `HTTP-Referer` / `X-Title` 头用于排名。
-
-> [!NOTE]
-> 对于 **Google AI Studio**，提供完整端点 URL 或仅基础 `https://generativelanguage.googleapis.com/v1beta/models/`。代理根据请求是否为流式自动判断 `streamGenerateContent` 还是 `generateContent`。
-
-> [!NOTE]
-> **多模态 / 视觉（Vision）支持**：代理会将聊天中粘贴、或 Agent 自动截图并发送的图像（Gemini 的 `inlineData` 图像 part）正确翻译为目标提供商的标准结构 — OpenAI 的 `image_url` 内容块、Anthropic 的 `type: "image"` 内容块，使 GPT-4o、Claude 3.5 Sonnet 等视觉模型真正“看见”图像（而非退化为 `[Image: data:...]` 占位文本）。能否解码图像仍取决于所用模型本身是否支持视觉。
+> **多模态 / 视觉（Vision）支持**：代理会将聊天中粘贴、或 Agent 自动截图并发送的图像（Gemini 的 `inlineData` 图像 part）翻译为目标提供商的标准结构 — OpenAI 的 `image_url` 内容块、Anthropic 的 `type: "image"` 内容块。能否真正解码图像仍取决于目标模型本身是否具备多模态能力。
 
 ---
 
@@ -122,56 +138,46 @@ npx tsc
 
 你可以通过代理服务内置的**可视化配置与连通性测试面板**（访问 `http://127.0.0.1:50999/`）以图形化界面轻松添加、测试连通性、编辑与管理模型，也可直接编辑该 JSON 文件。
 
-以下是一个**同时配置所有提供商多个模型**的 `custom_models.json` 完整示例：
+以下为**本地已实测验证可用的真实模型配置示例**（基于商汤日日新与 B.AI）：
 
 ```json
 {
   "models": [
     {
-      "name": "models/gpt-4o",
-      "displayName": "GPT-4o (OpenAI)",
-      "description": "经官方 API 的 OpenAI GPT-4o 模型",
+      "name": "models/deepseek-v4-flash",
+      "displayName": "商汤 V4 Flash",
+      "description": "商汤 SenseNova 托管的 DeepSeek V4 Flash（已深度适配工具调用）",
       "provider": "openai",
-      "apiKey": "sk-proj-...",
-      "apiUrl": "https://api.openai.com/v1/chat/completions",
-      "externalModelName": "gpt-4o"
+      "apiKey": "YOUR_SENSENOVA_API_KEY",
+      "apiUrl": "https://token.sensenova.cn/v1/chat/completions",
+      "externalModelName": "deepseek-v4-flash"
     },
     {
-      "name": "models/claude-3-5-sonnet",
-      "displayName": "Claude 3.5 Sonnet",
-      "description": "经官方 API 的 Anthropic Claude 3.5 Sonnet",
-      "provider": "anthropic",
-      "apiKey": "sk-ant-...",
-      "apiUrl": "https://api.anthropic.com/v1/messages",
-      "externalModelName": "claude-3-5-sonnet-latest"
+      "name": "models/sensenova-6.8-flash-lite",
+      "displayName": "SenseNova 6.8 Flash Lite",
+      "description": "商汤日日新轻量闪电模型",
+      "provider": "openai",
+      "apiKey": "YOUR_SENSENOVA_API_KEY",
+      "apiUrl": "https://token.sensenova.cn/v1/chat/completions",
+      "externalModelName": "sensenova-6.8-flash-lite"
     },
     {
-      "name": "models/gemini-1.5-pro",
-      "displayName": "Gemini 1.5 Pro (AI Studio)",
-      "description": "经 Google AI Studio 密钥的 Gemini 1.5 Pro",
-      "provider": "google",
-      "apiKey": "AIzaSy...",
-      "apiUrl": "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent",
-      "externalModelName": "gemini-1.5-pro"
+      "name": "models/hy3",
+      "displayName": "Hy3 (B.AI)",
+      "description": "B.AI 托管模型",
+      "provider": "openai",
+      "apiKey": "YOUR_BAI_API_KEY",
+      "apiUrl": "https://api.b.ai/v1/chat/completions",
+      "externalModelName": "hy3"
     },
     {
-      "name": "models/llama3",
-      "displayName": "Llama 3 (本地 Ollama)",
-      "description": "运行在 Ollama 11434 端口的本地 Llama 3 模型",
-      "provider": "ollama",
-      "apiKey": "",
-      "apiUrl": "http://localhost:11434/v1/chat/completions",
-      "externalModelName": "llama3"
-    },
-    {
-      "name": "models/deepseek-ai/deepseek-v4-pro",
-      "displayName": "DeepSeek V4 Pro (Together)",
-      "description": "经 Together API 的 DeepSeek V4 Pro",
-      "provider": "custom",
-      "apiKey": "YOUR_TOGETHER_API_KEY",
-      "apiUrl": "https://api.together.xyz/v1",
-      "externalModelName": "deepseek-ai/DeepSeek-V4-Pro",
-      "maxRetries": 3
+      "name": "models/glm-5-3-flash",
+      "displayName": "Glm 5.3 Flash (B.AI)",
+      "description": "B.AI 托管 GLM 5.3 Flash",
+      "provider": "openai",
+      "apiKey": "YOUR_BAI_API_KEY",
+      "apiUrl": "https://api.b.ai/v1/chat/completions",
+      "externalModelName": "glm-5.3-flash"
     }
   ]
 }
@@ -207,7 +213,7 @@ npx tsc
 ### 核心特性
 
 1. **多厂商快速预设模板**：
-   - 顶部提供一键预填芯片：**DeepSeek 官方**、**DeepSeek-R1（深度思考）**、**OpenAI GPT-4o**、**Claude 3.5 Sonnet**、**Ollama 本地**、**OpenRouter 聚合**、**硅基流动 SiliconFlow**、**商汤日日新 SenseNova**、**月之暗面 Kimi**、**Google AI Studio** 等，点击即可一键填入标准 API Endpoint 与推荐参数。
+   - 顶部提供一键预填芯片：**DeepSeek 官方**、**DeepSeek-R1（深度思考）**、**OpenAI GPT-4o**、**Claude 3.5 Sonnet**、**Ollama 本地**、**OpenRouter 聚合**、**硅基流动 SiliconFlow**、**商汤日日新 SenseNova**、**月之暗面 Kimi**、**Google AI Studio** 等，点击即可一键填入标准 API Endpoint 与推荐参数。（*提示：预设芯片主要为通用配置模板，除商汤日日新 SenseNova 等本地已验证平台外，其余预设端点在本项目中均未经任何联调验证，填入后请务必先点击“测试连接”并自行排查工具调用兼容性*）。
 2. **智能连通性探测引擎**：
    - 支持单个模型卡片 **“测试连接”** 与顶栏 **“一键测速全部”**，向目标上游发送真实轻量握手请求。
    - 实时测量网络 **RTT 延迟（毫秒）**，并抓取模型真实输出片段。

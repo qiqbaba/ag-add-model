@@ -296,6 +296,44 @@ export function renderDashboardHtml(): string {
       padding: 5px 12px;
       font-size: 0.78rem;
     }
+    .presets-subgroup {
+      margin-bottom: 8px;
+    }
+    .presets-subgroup-label {
+      font-size: 0.72rem;
+      font-weight: 600;
+      color: var(--text-secondary);
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .preset-chip.verified-chip {
+      border-color: rgba(16, 185, 129, 0.4);
+      background: rgba(16, 185, 129, 0.08);
+      color: #a7f3d0;
+      font-weight: 600;
+    }
+    .preset-chip.verified-chip:hover {
+      background: rgba(16, 185, 129, 0.2);
+      border-color: rgba(16, 185, 129, 0.6);
+      color: #ecfdf5;
+    }
+    .preset-chip.unverified-chip {
+      color: var(--text-muted);
+      border-color: var(--border-subtle);
+    }
+    .preset-chip.unverified-chip:hover {
+      border-color: var(--border-medium);
+      color: var(--text-secondary);
+      background: rgba(255, 255, 255, 0.04);
+    }
+    .presets-warning-note {
+      font-size: 0.71rem;
+      color: var(--text-muted);
+      margin-top: 6px;
+      line-height: 1.4;
+    }
 
     /* ─── Controls Bar ───────────────────────────────────── */
     .controls-bar {
@@ -621,7 +659,7 @@ export function renderDashboardHtml(): string {
        so they read left-to-right instead of stacking into one long column. */
     .model-rows {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+      grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
       gap: 12px;
       padding: 16px 20px;
     }
@@ -629,6 +667,8 @@ export function renderDashboardHtml(): string {
     .model-row {
       display: flex;
       flex-direction: column;
+      justify-content: space-between;
+      min-height: 92px;
       gap: 10px;
       background: var(--bg-surface);
       border: 1px solid var(--border-subtle);
@@ -650,19 +690,18 @@ export function renderDashboardHtml(): string {
       min-width: 0;
     }
 
+    .model-row-display-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      flex-wrap: wrap;
+    }
+
     .model-row-display {
       font-size: 0.92rem;
       font-weight: 600;
       color: var(--text-primary);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    .model-row-meta {
-      font-size: 0.72rem;
-      color: var(--text-muted);
-      font-family: var(--font-mono);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -673,12 +712,20 @@ export function renderDashboardHtml(): string {
       align-items: center;
       gap: 6px;
       flex-wrap: wrap;
+      flex-shrink: 0;
     }
 
     .model-row-actions {
       display: flex;
       align-items: center;
       gap: 6px;
+    }
+
+    .model-row-actions .btn {
+      flex: 1;
+      justify-content: center;
+      padding-left: 6px;
+      padding-right: 6px;
     }
 
     .model-row > .test-result-box {
@@ -1080,8 +1127,7 @@ export function renderDashboardHtml(): string {
         </div>
         <div>
           <div class="brand-title">
-            Antigravity Models
-            <span class="brand-badge">Standalone IDE</span>
+            Antigravity IDE 自定义模型
           </div>
         </div>
       </div>
@@ -1094,10 +1140,7 @@ export function renderDashboardHtml(): string {
         <div class="pill" id="pill-model-count">
           <span>已加载模型: <strong id="lbl-model-count">0</strong></span>
         </div>
-        <div class="pill" id="pill-encryption-status">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
-          <span id="lbl-encryption-text">safeStorage 加密保护</span>
-        </div>
+
       </div>
 
       <div class="header-actions">
@@ -1170,51 +1213,73 @@ export function renderDashboardHtml(): string {
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"></path><line x1="4" y1="22" x2="4" y2="15"></line></svg>
             快速预设模板 (点击快速填表)
           </div>
-          <div class="presets-grid">
-            <button class="preset-chip" onclick="applyPreset('deepseek')">
-              <span>🚀</span> DeepSeek 官方
-            </button>
-            <button class="preset-chip" onclick="applyPreset('deepseek-r1')">
-              <span>🧠</span> DeepSeek-R1 深度思考
-            </button>
-            <button class="preset-chip" onclick="applyPreset('openai-gpt4o')">
-              <span>⚡</span> OpenAI GPT-4o
-            </button>
-            <button class="preset-chip" onclick="applyPreset('anthropic-claude')">
-              <span>👑</span> Claude 3.5 Sonnet
-            </button>
-            <button class="preset-chip" onclick="applyPreset('ollama-local')">
-              <span>🦙</span> Ollama 本地模型
-            </button>
-            <button class="preset-chip" onclick="applyPreset('openrouter')">
-              <span>🌐</span> OpenRouter 聚合
-            </button>
-            <button class="preset-chip" onclick="applyPreset('siliconflow')">
-              <span>⚡</span> 硅基流动 SiliconFlow
-            </button>
-            <button class="preset-chip" onclick="applyPreset('sensenova')">
-              <span>🌌</span> 商汤日日新 SenseNova
-            </button>
-            <button class="preset-chip" onclick="applyPreset('moonshot')">
-              <span>🌙</span> 月之暗面 Kimi
-            </button>
-            <button class="preset-chip" onclick="applyPreset('google-ai')">
-              <span>🔮</span> Google AI Studio
-            </button>
+
+          <!-- 已实测验证平台 -->
+          <div class="presets-subgroup">
+            <div class="presets-subgroup-label" style="color: #6ee7b7;">
+              <span>已实测验证平台 (推荐使用)</span>
+            </div>
+            <div class="presets-grid">
+              <button type="button" class="preset-chip verified-chip" onclick="applyPreset('sensenova')">
+                商汤日日新 SenseNova [已验证]
+              </button>
+              <button type="button" class="preset-chip verified-chip" onclick="applyPreset('bai')">
+                智源 / 蜂动 B.AI [已验证]
+              </button>
+            </div>
+          </div>
+
+          <!-- 其他厂商预设 (未经验证) -->
+          <div class="presets-subgroup" style="margin-top: 10px;">
+            <div class="presets-subgroup-label" style="color: var(--text-muted);">
+              <span>其他厂商预设 (未经任何验证，效果未知)</span>
+            </div>
+            <div class="presets-grid">
+              <button type="button" class="preset-chip unverified-chip" onclick="applyPreset('deepseek')">
+                DeepSeek 官方
+              </button>
+              <button type="button" class="preset-chip unverified-chip" onclick="applyPreset('deepseek-r1')">
+                DeepSeek-R1 深度思考
+              </button>
+              <button type="button" class="preset-chip unverified-chip" onclick="applyPreset('openai-gpt4o')">
+                OpenAI GPT-4o
+              </button>
+              <button type="button" class="preset-chip unverified-chip" onclick="applyPreset('anthropic-claude')">
+                Claude 3.5 Sonnet
+              </button>
+              <button type="button" class="preset-chip unverified-chip" onclick="applyPreset('ollama-local')">
+                Ollama 本地
+              </button>
+              <button type="button" class="preset-chip unverified-chip" onclick="applyPreset('openrouter')">
+                OpenRouter 聚合
+              </button>
+              <button type="button" class="preset-chip unverified-chip" onclick="applyPreset('siliconflow')">
+                硅基流动 SiliconFlow
+              </button>
+              <button type="button" class="preset-chip unverified-chip" onclick="applyPreset('moonshot')">
+                月之暗面 Kimi
+              </button>
+              <button type="button" class="preset-chip unverified-chip" onclick="applyPreset('google-ai')">
+                Google AI Studio
+              </button>
+            </div>
+            <div class="presets-warning-note">
+              * 提示：除商汤与 B.AI 外，其他厂商在本项目中未经任何实际测试与验证，工具调用可能无法正常触发，仅供配置参考。
+            </div>
           </div>
         </div>
 
         <div class="form-group">
           <label class="form-label">
             <span>协议翻译器 (Provider) <span style="color: var(--accent-rose)">*</span></span>
-            <span class="form-hint" style="color: var(--accent-amber)">所有兼容 /v1/chat/completions 的厂商请填 openai</span>
+            <span class="form-hint" style="color: var(--accent-amber)">当前仅 openai 协议在商汤/B.AI上经实测验证通过</span>
           </label>
           <select id="form-provider" class="form-control" onchange="handleProviderChange()">
-            <option value="openai">openai (OpenAI 协议: DeepSeek, SiliconFlow, SenseNova, Moonshot, Groq 等)</option>
-            <option value="anthropic">anthropic (Anthropic 协议: Claude 系列)</option>
-            <option value="ollama">ollama (本地 Ollama 服务)</option>
-            <option value="google">google (Google AI Studio 直连)</option>
-            <option value="custom">custom (自定义兼容协议)</option>
+            <option value="openai">openai (OpenAI 协议: 商汤、B.AI 已实测验证；其他平台未经验证)</option>
+            <option value="anthropic">anthropic (Anthropic 协议: Claude 系列，未经验证)</option>
+            <option value="ollama">ollama (本地 Ollama 服务，未经验证)</option>
+            <option value="google">google (Google AI Studio 直连，未经验证)</option>
+            <option value="custom">custom (自定义兼容协议，未经验证)</option>
           </select>
         </div>
 
@@ -1256,13 +1321,8 @@ export function renderDashboardHtml(): string {
           <input type="text" id="form-display-name" class="form-control" placeholder="例如: DeepSeek-V3 (官方 API)" oninput="autoDeriveNames()" />
         </div>
 
-        <div class="form-group">
-          <label class="form-label">
-            <span>内部模型标识 (Name) <span style="color: var(--accent-rose)">*</span></span>
-            <span class="form-hint">必须以 models/ 开头（可通过上方「自动获取模型」自动填充）</span>
-          </label>
-          <input type="text" id="form-name" class="form-control" placeholder="例如: models/deepseek-v3" />
-        </div>
+        <!-- 内部模型标识 (Name) 不再展示给用户：格式固定为 models/<slug>，由显示名称自动派生 -->
+        <input type="hidden" id="form-name" />
 
         <div class="form-group">
           <label class="form-label">
@@ -1281,11 +1341,11 @@ export function renderDashboardHtml(): string {
           <div style="display: flex; flex-direction: column; gap: 8px;">
             <label class="checkbox-group" style="margin: 0; cursor: pointer;">
               <input type="checkbox" id="form-supports-images" />
-              <span>🖼️ <strong>支持图片 / 视觉多模态</strong> (允许在 Antigravity 中上传图片并自动转换为目标视觉格式)</span>
+              <span><strong>支持图片 / 视觉多模态</strong> (允许在 Antigravity 中上传图片并自动转换为目标视觉格式)</span>
             </label>
             <label class="checkbox-group" style="margin: 0; cursor: pointer;">
               <input type="checkbox" id="form-supports-thinking" />
-              <span>🧠 <strong>支持深度思考 / 推理</strong> (在 Antigravity 中声明为思考模型并展示思考过程)</span>
+              <span><strong>支持深度思考 / 推理</strong> (在 Antigravity 中声明为思考模型并展示思考过程)</span>
             </label>
           </div>
         </div>
@@ -1375,20 +1435,29 @@ export function renderDashboardHtml(): string {
         </button>
       </div>
       <div class="modal-body" style="font-size: 0.85rem; color: var(--text-secondary); line-height: 1.6;">
-        <h4 style="color: var(--text-primary); margin-bottom: 4px;">1. Provider 字段填写规则（重点避坑 9）</h4>
+        <div style="padding: 10px 14px; background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.3); border-radius: var(--radius-sm); margin-bottom: 14px; color: #fde68a;">
+          <strong style="color: #fbbf24;">平台实测验证重要提示：</strong><br>
+          本项目中<strong>仅本地已添加的平台（商汤日日新 SenseNova、智源/蜂动 B.AI）经过了完整联调与实测验证可用</strong>（包含 prompt-XML 工具调用、流式分块与乱码修复）。<br>
+          其他所有第三方平台在本项目中均<strong>未经任何测试与验证</strong>，无法保证在 Antigravity IDE 环境下能正常工作，极可能出现工具不执行或回答截断等问题。
+        </div>
+
+        <h4 style="color: var(--text-primary); margin-bottom: 4px;">1. Provider 字段填写规则与平台验证状态</h4>
         <p>
-          <code>provider</code> 代表的是<strong>协议转换器类型</strong>，不是厂商品牌名。
+          <code>provider</code> 代表的是<strong>协议转换器类型</strong>，不是厂商品牌名。只要是兼容 OpenAI 格式的接口，<code>provider</code> 必须填写 <code>openai</code>。
         </p>
         <table class="guide-table">
           <thead>
-            <tr><th>厂商 / 平台</th><th>provider 必须填写</th><th>apiUrl 示例</th></tr>
+            <tr><th>厂商 / 平台</th><th>provider 填写</th><th>apiUrl 示例</th><th>验证状态</th></tr>
           </thead>
           <tbody>
-            <tr><td>DeepSeek 官方</td><td><code>openai</code></td><td><code>https://api.deepseek.com/v1/chat/completions</code></td></tr>
-            <tr><td>硅基流动 / 商汤 / 月之暗面</td><td><code>openai</code></td><td>各平台的 <code>/v1/chat/completions</code> 路径</td></tr>
-            <tr><td>Anthropic Claude</td><td><code>anthropic</code></td><td><code>https://api.anthropic.com/v1/messages</code></td></tr>
-            <tr><td>Ollama 本地大模型</td><td><code>ollama</code></td><td><code>http://localhost:11434/v1/chat/completions</code></td></tr>
-            <tr><td>Google AI Studio</td><td><code>google</code></td><td><code>https://generativelanguage.googleapis.com/v1beta</code></td></tr>
+            <tr style="background: rgba(16, 185, 129, 0.05);"><td style="color: #a7f3d0; font-weight: 600;">商汤日日新 SenseNova</td><td><code>openai</code></td><td><code>https://token.sensenova.cn/v1/chat/completions</code></td><td style="color: #6ee7b7; font-weight: 600;">已实测验证可用</td></tr>
+            <tr style="background: rgba(16, 185, 129, 0.05);"><td style="color: #a7f3d0; font-weight: 600;">智源 / 蜂动 B.AI</td><td><code>openai</code></td><td><code>https://api.b.ai/v1/chat/completions</code></td><td style="color: #6ee7b7; font-weight: 600;">已实测验证可用</td></tr>
+            <tr><td>DeepSeek 官方</td><td><code>openai</code></td><td><code>https://api.deepseek.com/v1/chat/completions</code></td><td style="color: var(--text-muted);">未经任何验证</td></tr>
+            <tr><td>硅基流动 SiliconFlow</td><td><code>openai</code></td><td><code>https://api.siliconflow.cn/v1/chat/completions</code></td><td style="color: var(--text-muted);">未经任何验证</td></tr>
+            <tr><td>月之暗面 Kimi</td><td><code>openai</code></td><td><code>https://api.moonshot.cn/v1/chat/completions</code></td><td style="color: var(--text-muted);">未经任何验证</td></tr>
+            <tr><td>Anthropic Claude</td><td><code>anthropic</code></td><td><code>https://api.anthropic.com/v1/messages</code></td><td style="color: var(--text-muted);">未经任何验证</td></tr>
+            <tr><td>Ollama 本地大模型</td><td><code>ollama</code></td><td><code>http://localhost:11434/v1/chat/completions</code></td><td style="color: var(--text-muted);">未经任何验证</td></tr>
+            <tr><td>Google AI Studio</td><td><code>google</code></td><td><code>https://generativelanguage.googleapis.com/v1beta</code></td><td style="color: var(--text-muted);">未经任何验证</td></tr>
           </tbody>
         </table>
 
@@ -1460,12 +1529,6 @@ export function renderDashboardHtml(): string {
       if (!state.systemInfo) return;
       document.getElementById('lbl-proxy-port').textContent = state.systemInfo.proxyPort || '50999';
       document.getElementById('lbl-config-path').textContent = state.systemInfo.customModelsPath || '~/.gemini/antigravity/custom_models.json';
-      const encText = document.getElementById('lbl-encryption-text');
-      if (state.systemInfo.encryptionAvailable) {
-        encText.textContent = 'safeStorage 加密保护';
-      } else {
-        encText.textContent = 'Base64 兼容存储';
-      }
     }
 
     // ─── Source platform (来源平台) derivation ───────────────
@@ -1539,16 +1602,23 @@ export function renderDashboardHtml(): string {
     function renderModelRow(m) {
       const isVision = m.capabilities && m.capabilities.supportsImages;
       const caps = [];
-      if (isVision) caps.push('<span class="cap-tag active-vision">🖼️ 视觉/多模态</span>');
-      if (m.allowUnauthorized) caps.push('<span class="cap-tag" style="border-color: rgba(245, 158, 11, 0.4); color: #fcd34d;">🔓 SSL Bypass</span>');
+      const isVerified = /sensenova|api\.b\.ai/i.test(m.apiUrl || '');
+      if (isVerified) {
+        caps.push('<span class="cap-tag" style="border-color: rgba(16, 185, 129, 0.4); color: #6ee7b7; background: rgba(16, 185, 129, 0.08);">已实测验证</span>');
+      } else {
+        caps.push('<span class="cap-tag" style="border-color: rgba(148, 163, 184, 0.25); color: #94a3b8;">未经验证</span>');
+      }
+      if (isVision) caps.push('<span class="cap-tag active-vision">视觉</span>');
+      if (m.allowUnauthorized) caps.push('<span class="cap-tag" style="border-color: rgba(245, 158, 11, 0.4); color: #fcd34d;">SSL Bypass</span>');
 
       return \`
         <div class="model-row">
           <div class="model-row-main">
-            <div class="model-row-display">\${escapeHtml(m.displayName)}</div>
-            <div class="model-row-meta">\${escapeHtml(m.name)} · 外部: \${escapeHtml(m.externalModelName || '(同内部名称)')}</div>
+            <div class="model-row-display-row">
+              <div class="model-row-display">\${escapeHtml(m.displayName)}</div>
+              \${caps.length ? '<div class="model-row-caps">' + caps.join('') + '</div>' : ''}
+            </div>
           </div>
-          \${caps.length ? '<div class="model-row-caps">' + caps.join('') + '</div>' : ''}
           <div class="model-row-actions">
             <button id="btn-test-\${m.slug}" class="btn btn-secondary btn-sm" onclick="testModel('\${escapeHtml(m.name)}', '\${m.slug}')">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
@@ -1954,7 +2024,7 @@ export function renderDashboardHtml(): string {
       if (!nameInput.value || nameInput.value.startsWith('models/')) {
         nameInput.value = 'models/' + slugifyDiscovered(id);
       }
-      showToast('已自动填充外部模型名称、内部标识 (Name) 与显示名称', 'success');
+      showToast('已自动填充外部模型名称与显示名称', 'success');
     }
 
     function handleProviderChange() {
@@ -2065,7 +2135,7 @@ export function renderDashboardHtml(): string {
       };
 
       if (!model.displayName || !model.name || !model.apiUrl) {
-        showToast('请完整填写显示名称、内部标识与 API URL', 'error');
+        showToast('请完整填写显示名称与 API URL', 'error');
         return;
       }
 
@@ -2122,6 +2192,26 @@ export function renderDashboardHtml(): string {
     function applyPreset(type) {
       openAddModal();
       const presets = {
+        'sensenova': {
+          displayName: '商汤 V4 Flash',
+          name: 'models/deepseek-v4-flash',
+          externalModelName: 'deepseek-v4-flash',
+          provider: 'openai',
+          apiUrl: 'https://token.sensenova.cn/v1/chat/completions',
+          supportsImages: false,
+          supportsThinking: true,
+          verified: true,
+        },
+        'bai': {
+          displayName: 'Hy3 (B.AI)',
+          name: 'models/hy3',
+          externalModelName: 'hy3',
+          provider: 'openai',
+          apiUrl: 'https://api.b.ai/v1/chat/completions',
+          supportsImages: false,
+          supportsThinking: false,
+          verified: true,
+        },
         'deepseek': {
           displayName: 'DeepSeek-V3 (官方 API)',
           name: 'models/deepseek-v3',
@@ -2130,6 +2220,7 @@ export function renderDashboardHtml(): string {
           apiUrl: 'https://api.deepseek.com/v1/chat/completions',
           supportsImages: false,
           supportsThinking: false,
+          verified: false,
         },
         'deepseek-r1': {
           displayName: 'DeepSeek-R1 (深度思考)',
@@ -2139,6 +2230,7 @@ export function renderDashboardHtml(): string {
           apiUrl: 'https://api.deepseek.com/v1/chat/completions',
           supportsImages: false,
           supportsThinking: true,
+          verified: false,
         },
         'openai-gpt4o': {
           displayName: 'GPT-4o (OpenAI 官方)',
@@ -2148,6 +2240,7 @@ export function renderDashboardHtml(): string {
           apiUrl: 'https://api.openai.com/v1/chat/completions',
           supportsImages: true,
           supportsThinking: false,
+          verified: false,
         },
         'anthropic-claude': {
           displayName: 'Claude 3.5 Sonnet (Anthropic)',
@@ -2157,6 +2250,7 @@ export function renderDashboardHtml(): string {
           apiUrl: 'https://api.anthropic.com/v1/messages',
           supportsImages: true,
           supportsThinking: true,
+          verified: false,
         },
         'ollama-local': {
           displayName: 'Llama 3 (本地 Ollama)',
@@ -2166,6 +2260,7 @@ export function renderDashboardHtml(): string {
           apiUrl: 'http://localhost:11434/v1/chat/completions',
           supportsImages: false,
           supportsThinking: false,
+          verified: false,
         },
         'openrouter': {
           displayName: 'Claude 3.5 via OpenRouter',
@@ -2175,6 +2270,7 @@ export function renderDashboardHtml(): string {
           apiUrl: 'https://openrouter.ai/api/v1/chat/completions',
           supportsImages: true,
           supportsThinking: true,
+          verified: false,
         },
         'siliconflow': {
           displayName: 'DeepSeek-V3 (硅基流动)',
@@ -2184,15 +2280,7 @@ export function renderDashboardHtml(): string {
           apiUrl: 'https://api.siliconflow.cn/v1/chat/completions',
           supportsImages: false,
           supportsThinking: false,
-        },
-        'sensenova': {
-          displayName: 'SenseChat-5 (商汤日日新)',
-          name: 'models/sensenova-5',
-          externalModelName: 'SenseChat-5',
-          provider: 'openai',
-          apiUrl: 'https://api.sensenova.cn/v1/llm/chat-completions',
-          supportsImages: false,
-          supportsThinking: false,
+          verified: false,
         },
         'moonshot': {
           displayName: 'Kimi (月之暗面)',
@@ -2202,6 +2290,7 @@ export function renderDashboardHtml(): string {
           apiUrl: 'https://api.moonshot.cn/v1/chat/completions',
           supportsImages: true,
           supportsThinking: false,
+          verified: false,
         },
         'google-ai': {
           displayName: 'Gemini 2.0 Flash (AI Studio)',
@@ -2211,6 +2300,7 @@ export function renderDashboardHtml(): string {
           apiUrl: 'https://generativelanguage.googleapis.com/v1beta',
           supportsImages: true,
           supportsThinking: false,
+          verified: false,
         }
       };
 
@@ -2223,6 +2313,12 @@ export function renderDashboardHtml(): string {
         document.getElementById('form-api-url').value = p.apiUrl;
         document.getElementById('form-supports-images').checked = !!p.supportsImages;
         document.getElementById('form-supports-thinking').checked = !!p.supportsThinking;
+
+        if (p.verified) {
+          showToast('已应用 ' + p.displayName + ' 预设（已实测验证可用平台）', 'success');
+        } else {
+          showToast('已应用 ' + p.displayName + ' 预设。注意：该平台未经测试验证，效果未知！', 'info');
+        }
       }
     }
 
