@@ -197,7 +197,10 @@ interface DSMLParsedResult {
  * 连续序列，正文误含概率几乎为零。
  */
 function normalizeDSMLPipes(text: string): string {
-  return text.replace(/<｜DSML｜/g, '<DSML|').replace(/<\/｜DSML｜/g, '</DSML|');
+  if (!text) return text;
+  return text
+    .replace(/<[\s|｜]*DSML[\s|｜]*\s*/gi, '<DSML|')
+    .replace(/<\/[\s|｜]*DSML[\s|｜]*\s*/gi, '</DSML|');
 }
 
 /**
@@ -205,6 +208,10 @@ function normalizeDSMLPipes(text: string): string {
  */
 const TOOL_CALL_START_MARKERS = [
   '<DSML|',
+  '<｜DSML｜',
+  '<｜｜DSML｜｜',
+  '<|DSML|',
+  '<||DSML||',
   '<tool_call',
   '<function_call',
   '<tool>',
@@ -222,8 +229,9 @@ const TOOL_CALL_START_MARKERS = [
  * Used to hold partial markup back so it never leaks as visible text while in flight.
  */
 function hasUnclosedToolCallBlock(text: string): boolean {
-  const dsmlOpens = (text.match(/<DSML\|/g) || []).length;
-  const dsmlCloses = (text.match(/<\/DSML\|/g) || []).length;
+  const norm = normalizeDSMLPipes(text);
+  const dsmlOpens = (norm.match(/<DSML\|/g) || []).length;
+  const dsmlCloses = (norm.match(/<\/DSML\|/g) || []).length;
   if (dsmlOpens > dsmlCloses) return true;
 
   // Symmetric <tool_call> / <function_call> opens vs closes.
@@ -881,14 +889,18 @@ function splitToolNameAndArgs(body: string): { name: string; argsBlock: string }
 
 function parseArgsFromBlock(block: string): Record<string, unknown> | null {
   // 1. Check for <parameter> or <DSML|parameter>
-  const paramRegex = /<(?:DSML\|)?parameter\s+name="([^"]+)"(?:\s+string="([^"]+)")?>([\s\S]*?)<\/(?:DSML\|)?parameter>/g;
+  const paramRegex = /<(?:DSML\|)?parameter\s+([^>]*?)>([\s\S]*?)<\/(?:DSML\|)?parameter>/g;
   let paramMatch: RegExpExecArray | null;
   const paramArgs: Record<string, unknown> = {};
   let hasParams = false;
   while ((paramMatch = paramRegex.exec(block)) !== null) {
-    const paramName = paramMatch[1];
-    let paramValue: unknown = paramMatch[3].trim();
-    const isString = paramMatch[2] === 'true';
+    const attrs = paramMatch[1];
+    const nameMatch = /name="([^"]+)"/.exec(attrs);
+    if (!nameMatch) continue;
+    const paramName = nameMatch[1];
+    let paramValue: unknown = paramMatch[2].trim();
+    const stringMatch = /string="([^"]+)"/.exec(attrs);
+    const isString = stringMatch ? stringMatch[1] === 'true' : false;
     if (!isString) {
       try {
         paramValue = JSON.parse(paramValue as string);
@@ -1058,6 +1070,7 @@ function parseDSMLToolCalls(
   paramSchemas?: Record<string, string[]> | null,
 ): DSMLParsedResult | null {
   try {
+    text = normalizeDSMLPipes(text);
     const functionCalls: { name: string; args: Record<string, unknown> }[] = [];
     const consumedBlocks: string[] = [];
 
@@ -1176,7 +1189,7 @@ function parseDSMLToolCalls(
 
     // Pass 3: Tag name contains the function name: <DSML|_command>{...}</DSML|_command> or <tool_call:funcName>{...}</tool_call:funcName>
     const tagNamedRegex =
-      /<(?:DSML\||tool_call:|function_call:)((?!tool_calls|tool_call|invoke|parameter)[A-Za-z_][\w]*)([^>]*)>([\s\S]*?)<\/(?:DSML\||tool_call:|function_call:)\1>/g;
+      /<(?:DSML\||tool_call:|function_call:)((?!tool_calls|calls|tool_call|invoke|parameter)[A-Za-z_][\w]*)([^>]*)>([\s\S]*?)<\/(?:DSML\||tool_call:|function_call:)\1>/g;
     while ((match = tagNamedRegex.exec(text)) !== null) {
       if (match[0] && !insideCodeFence(match.index)) {
         const fullArgs = ((match[2] || '') + '\n' + (match[3] || '')).trim();
@@ -1189,7 +1202,7 @@ function parseDSMLToolCalls(
     // The symmetric requirement in Pass 3 above misses this, causing the whole
     // block to leak as visible text (see image 2).
     const asymTagNamedRegex =
-      /<(?:DSML\||tool_call:|function_call:)((?!tool_calls|tool_call|invoke|parameter)[A-Za-z_][\w]*)([^>]*)>([\s\S]*?)<\/\1>/g;
+      /<(?:DSML\||tool_call:|function_call:)((?!tool_calls|calls|tool_call|invoke|parameter)[A-Za-z_][\w]*)([^>]*)>([\s\S]*?)<\/\1>/g;
     while ((match = asymTagNamedRegex.exec(text)) !== null) {
       if (match[0] && !insideCodeFence(match.index)) {
         const fullArgs = ((match[2] || '') + '\n' + (match[3] || '')).trim();
@@ -1312,7 +1325,7 @@ function parseDSMLToolCalls(
     );
     let cleanText = text;
     for (const block of consumedBlocks) cleanText = cleanText.split(block).join('');
-    cleanText = cleanText.replace(/<DSML\|tool_calls>[\s\S]*?<\/DSML\|tool_calls>/g, '');
+    cleanText = cleanText.replace(/<DSML\|(?:tool_)?calls>[\s\S]*?<\/DSML\|(?:tool_)?calls>/g, '');
     cleanText = cleanText.replace(/<DSML\|parameter[^>]*>[\s\S]*?<\/DSML\|parameter>/g, '');
     cleanText = cleanText.replace(/<\/?DSML\|[^>]*>/g, '');
     cleanText = cleanText.replace(/<\/?(?:tool_call|function_call|tool|action)[^>]*>/g, '');
@@ -1596,7 +1609,7 @@ export function mapOpenAIChunkToGemini(
         context.withheldText = w.slice(0, w.length - heldSuffix.length);
         delete context.pendingHeldSuffix;
       }
-      const work = heldSuffix + text;
+      const work = normalizeDSMLPipes(heldSuffix + text);
       // Position of work[0] within accumulatedText: the held suffix is the
       // tail of prevAcc, so work starts heldSuffix.length earlier than text.
       const workBase = prevAcc.length - heldSuffix.length;
@@ -1653,7 +1666,7 @@ export function mapOpenAIChunkToGemini(
       // 坑 17 后续：已被消费的块遗留的孤儿 DSML 结构标签（真实 11:25 流收口后
       // 又来了两个多余的 `</DSML|tool_call>`）在后续帧走 safePrefix 路径。工具
       // 调用标记任何情况下不得作为可见正文发出，发射前过滤。
-      const visiblePrefix = safePrefix.replace(/<\/?DSML\|[^>]*>/g, '');
+      const visiblePrefix = normalizeDSMLPipes(safePrefix).replace(/<\/?DSML\|[^>]*>/g, '');
       if (visiblePrefix) emitParts.push({ text: visiblePrefix });
     }
   }

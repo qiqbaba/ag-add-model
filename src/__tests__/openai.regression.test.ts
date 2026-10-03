@@ -1040,6 +1040,70 @@ describe('regression k: multiple text-tag tool calls in one stream', () => {
     expect(text).not.toContain('DSML');
   });
 
+  it('g6d1 流式：DeepSeek V4 Pro 双全角竖线带空格 DSML (<｜｜DSML｜｜ calls>) → 成功解析多个工具调用、无泄漏', () => {
+    const sid = 'reg_g6d_stream';
+    const textChunks = [
+      '我先来检查一下仓库的 git 状态。\n\n<｜｜DSML｜｜ calls>\n',
+      '<｜｜DSML｜｜ invoke name="run_command">\n',
+      '<｜｜DSML｜｜ parameter name="Cwd" string="true">d:\\repo</｜｜DSML｜｜ parameter>\n',
+      '<｜｜DSML｜｜ parameter name="CommandLine" string="true">git status</｜｜DSML｜｜ parameter>\n',
+      '<｜｜DSML｜｜ parameter name="WaitMsBeforeAsync" string="false">5000</｜｜DSML｜｜ parameter>\n',
+      '<｜｜DSML｜｜ parameter name="toolSummary" string="true">Checking git status</｜｜DSML｜｜ parameter>\n',
+      '<｜｜DSML｜｜ parameter name="toolAction" string="true">Running git status</｜｜DSML｜｜ parameter>\n',
+      '</｜｜DSML｜｜ invoke>\n',
+      '<｜｜DSML｜｜ invoke name="run_command">\n',
+      '<｜｜DSML｜｜ parameter name="Cwd" string="true">d:\\repo</｜｜DSML｜｜ parameter>\n',
+      '<｜｜DSML｜｜ parameter name="CommandLine" string="true">git log --oneline -20</｜｜DSML｜｜ parameter>\n',
+      '<｜｜DSML｜｜ parameter name="toolSummary" string="true">Viewing git history</｜｜DSML｜｜ parameter>\n',
+      '<｜｜DSML｜｜ parameter name="toolAction" string="true">Running git log</｜｜DSML｜｜ parameter>\n',
+      '</｜｜DSML｜｜ invoke>\n',
+      '</｜｜DSML｜｜ calls>',
+    ];
+    const chunks = [
+      ...textChunks.map((s) => ({ id: sid, choices: [{ delta: { content: s }, index: 0 }] })),
+      { id: sid, choices: [{ delta: {}, finish_reason: 'stop', index: 0 }] },
+    ];
+    const results = chunks.map((c) => mapOpenAIChunkToGemini(c, 'deepseek-v4-pro'));
+    const fcs = collectFcs(results);
+    expect(fcs.length).toBe(2);
+    expect(fcs[0].name).toBe('run_command');
+    expect(fcs[0].args).toMatchObject({
+      CommandLine: 'git status',
+      Cwd: 'd:\\repo',
+      toolSummary: 'Checking git status',
+    });
+    expect(fcs[1].name).toBe('run_command');
+    expect(fcs[1].args).toMatchObject({
+      CommandLine: 'git log --oneline -20',
+      Cwd: 'd:\\repo',
+      toolSummary: 'Viewing git history',
+    });
+    const texts = collectTexts(results);
+    expect(texts).not.toContain('DSML');
+    expect(texts).toContain('我先来检查一下仓库的 git 状态。');
+  });
+
+  it('g6d2 非流式：DeepSeek V4 Pro 双全角竖线带空格 DSML → 成功解析', () => {
+    const content =
+      '好的。\n<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="run_command">\n<｜｜DSML｜｜ parameter name="CommandLine" string="true">git status</｜｜DSML｜｜ parameter>\n<｜｜DSML｜｜ parameter name="toolSummary" string="true">Check status</｜｜DSML｜｜ parameter>\n<｜｜DSML｜｜ parameter name="toolAction" string="true">Running command</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>';
+    const res = {
+      choices: [{ message: { content }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 5, completion_tokens: 15, total_tokens: 20 },
+    };
+    const result = mapOpenAIToGemini(res, 'deepseek-v4-pro');
+    const fc = fcsOf(result.candidates[0]);
+    expect(fc.length).toBe(1);
+    expect(fc[0].name).toBe('run_command');
+    expect(fc[0].args.CommandLine).toBe('git status');
+    expect(fc[0].args.toolSummary).toBe('Check status');
+    const text = result.candidates[0].content.parts
+      .filter((p: any) => p.text)
+      .map((p: any) => p.text)
+      .join('');
+    expect(text).not.toContain('DSML');
+    expect(text).toContain('好的。');
+  });
+
   // ═══ g7) 坑 18：toolSummary/toolAction 缺失或乱码 → 合成合法值 ═══════════════
   // 官方透传帧证实两键为 schema 必填（LS 报错串 "missing or invalid toolSummary
   // in arguments"）。商汤两种失格形态：lean 裸标签根本不输出（11:16 流）、
