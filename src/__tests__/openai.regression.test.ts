@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 回归测试：真实工具调用 vs 正文提及 —— 文本工具调用回归集（校准版）。
  *
  * 设计基准（openai.test.ts 现有四个 describe 块，236 项基线之外的补充）：
@@ -1138,3 +1138,84 @@ describe('regression k: multiple text-tag tool calls in one stream', () => {
     expect(shared.activeStreamContexts.size).toBe(0);
   });
 });
+
+// ═══ regression l) GLM-5.2 / 商汤: <tool_call>name key="val" 属性格式与未闭合收口（2026-10-03 真实故障）══════════════
+describe('regression l: GLM-5.2 attribute-style tool call syntax and unclosed block recovery', () => {
+  it('l1 流式真实场景：GLM-5.2 输出带属性参数的未闭合 <tool_call> → 解析成功、无泄漏、收口交付', () => {
+    const sid = 'reg_glm_attr_unclosed';
+    declareSchema(sid, 'glm-5.2', [
+      { name: 'list_dir', props: ['DirectoryPath', 'toolSummary', 'toolAction'] },
+    ]);
+    const chunks = [
+      { id: sid, choices: [{ delta: { content: '我来帮你完成 Git 初始化。先看看项目结构，以便生成合适的 `.gitignore`。' }, index: 0 }] },
+      { id: sid, choices: [{ delta: { content: '<tool_call>list_dir DirectoryPath="d:\\programme\\codebuddy-plugin+" toolSummary="Project directory listing" toolAction="Listing project directory"' }, index: 0 }] },
+      { id: sid, choices: [{ delta: {}, finish_reason: 'stop', index: 0 }] },
+    ];
+    const results = chunks.map((c) => mapOpenAIChunkToGemini(c, 'glm-5.2', sid));
+    const fcs = collectFcs(results);
+    expect(fcs.length).toBe(1);
+    expect(fcs[0].name).toBe('list_dir');
+    expect(fcs[0].args).toMatchObject({
+      DirectoryPath: 'd:\\programme\\codebuddy-plugin+',
+      toolSummary: 'Project directory listing',
+      toolAction: 'Listing project directory',
+    });
+    const texts = collectTexts(results);
+    expect(texts).not.toContain('<tool_call>');
+    expect(texts).toContain('我来帮你完成 Git 初始化');
+    expect(shared.activeStreamContexts.size).toBe(0);
+  });
+
+  it('l2 流式闭合标签：<tool_call>list_dir key="val"...</tool_call> → 解析成功', () => {
+    const sid = 'reg_glm_attr_closed';
+    declareSchema(sid, 'glm-5.2', [
+      { name: 'list_dir', props: ['DirectoryPath', 'toolSummary', 'toolAction'] },
+    ]);
+    const chunks = [
+      { id: sid, choices: [{ delta: { content: '<tool_call>list_dir DirectoryPath="d:\\test" toolSummary="test" toolAction="test"</tool_call>' }, index: 0 }] },
+      { id: sid, choices: [{ delta: {}, finish_reason: 'stop', index: 0 }] },
+    ];
+    const results = chunks.map((c) => mapOpenAIChunkToGemini(c, 'glm-5.2', sid));
+    const fcs = collectFcs(results);
+    expect(fcs.length).toBe(1);
+    expect(fcs[0].name).toBe('list_dir');
+    expect(fcs[0].args.DirectoryPath).toBe('d:\\test');
+  });
+
+  it('l3 非流式：GLM-5.2 属性参数一次性响应 → 解析成功', () => {
+    const sid = 'reg_glm_attr_nonstream';
+    declareSchema(sid, 'glm-5.2', [
+      { name: 'view_file', props: ['AbsolutePath', 'toolSummary', 'toolAction'] },
+    ]);
+    const content = '正在查看文件。<tool_call>view_file AbsolutePath="d:\\foo\\bar.ts" toolSummary="Reading file" toolAction="Reading file"';
+    const res = {
+      choices: [{ message: { content }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
+    };
+    const result = mapOpenAIToGemini(res, 'glm-5.2', sid);
+    const fcs = fcsOf(result.candidates[0]);
+    expect(fcs.length).toBe(1);
+    expect(fcs[0].name).toBe('view_file');
+    expect(fcs[0].args.AbsolutePath).toBe('d:\\foo\\bar.ts');
+  });
+
+  it('l4 标签含属性：<tool_call name="run_command" CommandLine="git status" Cwd="d:\\test" /> → 解析成功', () => {
+    const sid = 'reg_glm_tag_attr';
+    declareSchema(sid, 'glm-5.2', [
+      { name: 'run_command', props: ['CommandLine', 'Cwd', 'WaitMsBeforeAsync', 'toolSummary', 'toolAction'] },
+    ]);
+    const chunks = [
+      { id: sid, choices: [{ delta: { content: '<tool_call name="run_command" CommandLine="git status" Cwd="d:\\test" />' }, index: 0 }] },
+      { id: sid, choices: [{ delta: {}, finish_reason: 'stop', index: 0 }] },
+    ];
+    const results = chunks.map((c) => mapOpenAIChunkToGemini(c, 'glm-5.2', sid));
+    const fcs = collectFcs(results);
+    expect(fcs.length).toBe(1);
+    expect(fcs[0].name).toBe('run_command');
+    expect(fcs[0].args).toMatchObject({
+      CommandLine: 'git status',
+      Cwd: 'd:\\test',
+    });
+  });
+});
+

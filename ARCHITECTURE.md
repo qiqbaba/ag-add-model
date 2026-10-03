@@ -48,6 +48,7 @@
   - [坑 22：调用帧 response 级元数据缺失](#坑-22调用帧-response-级元数据缺失)
   - [坑 24：supportsToolCalls 顶层平铺无效（嵌套消息字段）](#坑-24supportstoolcalls-顶层平铺无效嵌套消息字段)
   - [坑 25（终极范式）：LS 只解析响应文本中的 prompt-XML 标记，functionCall part 被忽略](#坑-25终极范式ls-对自定义模型只解析响应文本中的-prompt-xml-标记functioncall-part-被忽略)
+  - [坑 26：GLM-5.2 在文本流中输出 key="value" 属性格式的未闭合 tool_call 标签导致参数解析失败与提前结束](#坑-26glm-52-在文本流中输出-keyvalue-属性格式的未闭合-tool_call-标签导致参数解析失败与提前结束)
 - [五、验证清单、日志速查与回滚](#五验证清单日志速查与回滚)
   - [5.1 部署验证清单](#51-部署验证清单)
   - [5.2 关键日志位置速查](#52-关键日志位置速查)
@@ -709,6 +710,25 @@ OpenAI 兼容自定义模型（`openai` / `custom` / `openrouter` / `ollama` 等
   4. 反向链路：无原生 tool_calls 历史时 functionResponse 转 user 文本（匹配 prompt 约定）。
 * **验证**：商汤 V4 Flash 发 `gc`（Git 自动提交技能）→ view_file + run_command 工具芯片弹出并真实执行，完整流程跑通；286/286 测试通过。
 * **教训**：**排查第三方宿主行为时，优先抓真实请求体/响应体做对照，而不是反复试探响应格式**——本次靠恢复请求体 dump 一步定位。
+
+---
+
+### 坑 26：GLM-5.2 在文本流中输出 key="value" 属性格式的未闭合 `<tool_call>` 标签导致参数解析失败与提前结束
+
+* **症状**（2026-10-03 真实故障）：用户在 IDE 中使用商汤平台托管的 `GLM 5.2` 模型时，模型生成思考与一句话后，界面直接把 `<tool_call>list_dir DirectoryPath="d:\programme\codebuddy-plugin+" toolSummary="Project directory listing" toolAction="Listing project directory"` 作为普通纯文本输出并提前结束，工具未执行，弹出点赞/点踩按钮；而同平台的 `sensenova-6.8-flash-lite` 正常使用。
+* **根因**：
+  1. **GLM 原生工具调用无闭合标签**：GLM-4 / GLM-5 架构在训练时原生采用 `<tool_call>name key="val"...` 结构表达工具调用，生成完毕后直接产生 EOS / `<|observation|>` 结束标记并以 `finish_reason: "stop"` 截断流，**不会生成 `</tool_call>` 闭合标签**。
+  2. **参数解析器只认冒号 `:` 键值对或 JSON，不认等号 `=` 属性**：`extractConcatenatedKeyValues` 原先正则仅匹配 `key: "val"`（冒号分隔），遇到 `DirectoryPath="d:\..."` 时正则未命中返回 `null`。在流结束（`finish_reason === 'stop'`）时，虽触发了 `allowUnclosed=true` 回收兜底，但由于 `parseArgsFromBlock` 提取参数失败，`pushCall` 放弃生成调用。
+  3. **未被解析的暂扣标记被原样冲刷**：因为 `functionCalls` 为空，代理认为扣留的内容为普通正文文本，执行 `if (held) emitParts.push({ text: held })` 将暂扣的原生 `<tool_call>` 文本回吐给前端，IDE 接收纯文本后认为会话已结束，导致任务意外终止。
+* **修复**（[`src/proxy/translators/openai.ts`](file:///d:/programme/antigravity-add-model/src/proxy/translators/openai.ts)）：
+  1. **键值提取支持 `[:=]`**：升级 `extractConcatenatedKeyValues`，同时支持冒号（`key: "val"`）与等号属性（`key="val"`、`key='val'`），并放宽末尾引号截断容错；
+  2. **分割逻辑联动**：`splitToolNameAndArgs` 允许函数名与 PascalCase 参数名直接粘连且以 `=` 衔接（`list_dirDirectoryPath="..."`）；
+  3. **Pass 2/3/4/5 全链增强**：
+     - 新增 Pass 2b 支持自闭合标签 `<tool_call name="..." ... />`；
+     - Pass 2/3/3b 提取标签内内联属性；
+     - Pass 4 与 Pass 5 增强 `name="..."` / `tool="..."` / `function="..."` 属性解析，并在 `body` 提取时全面覆盖未闭合与属性兼具的场景；
+     - `hasUnclosedToolCallBlock` 自动排除自闭合标签。
+* **验证**：流式/非流式回归测试覆盖真实场景片段（`regression l1~l4`），303/303 测试全数通过。
 
 ---
 

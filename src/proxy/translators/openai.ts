@@ -228,8 +228,9 @@ function hasUnclosedToolCallBlock(text: string): boolean {
 
   // Symmetric <tool_call> / <function_call> opens vs closes.
   const symOpens = (text.match(/<(?:tool_call|function_call)[>\s]/g) || []).length;
+  const selfCloses = (text.match(/<(?:tool_call|function_call)[^>]*?\/>/g) || []).length;
   const symCloses = (text.match(/<\/(?:tool_call|function_call)>/g) || []).length;
-  if (symOpens > symCloses) return true;
+  if (symOpens - selfCloses > symCloses) return true;
 
   // Asymmetric colon form <tool_call:name> ... </name> / </tool_call:name>.
   // The symmetric count above deliberately ignores the colon form (':' is not in
@@ -805,20 +806,23 @@ function extractJsonObject(body: string): Record<string, unknown> | null {
   }
 }
 
-/** Extracts key-value pairs from concatenated or malformed JSON (e.g. key":"val"key2":"val2"}). */
+/** Extracts key-value pairs from concatenated or malformed JSON or XML/HTML attributes (e.g. key":"val", key="val", key='val'). */
 function extractConcatenatedKeyValues(raw: string): Record<string, unknown> | null {
   const args: Record<string, unknown> = {};
   const kvRegex =
-    /(?:["']?([a-zA-Z0-9_.]+)["']?\s*:\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|true|false|null|-?\d+(?:\.\d+)?|\[[\s\S]*?\]|\{[\s\S]*?\})/g;
+    /(?:["']?([a-zA-Z0-9_.]+)["']?\s*[:=]\s*)("(?:\\.|[^"\\])*(?:"|$)|'(?:\\.|[^'\\])*(?:'|$)|true|false|null|-?\d+(?:\.\d+)?|\[[\s\S]*?\]|\{[\s\S]*?\})/g;
   let match: RegExpExecArray | null;
   let matchCount = 0;
   while ((match = kvRegex.exec(raw)) !== null) {
     const key = match[1];
     const valStr = match[2];
     let val: unknown = valStr;
-    if ((valStr.startsWith('"') && valStr.endsWith('"')) || (valStr.startsWith("'") && valStr.endsWith("'"))) {
-      const inner = valStr.slice(1, -1);
-      val = inner.replace(/\\"/g, '"').replace(/\\'/g, "'");
+    if (valStr.startsWith('"')) {
+      const inner = valStr.endsWith('"') && valStr.length > 1 ? valStr.slice(1, -1) : valStr.slice(1);
+      val = inner.replace(/\\"/g, '"');
+    } else if (valStr.startsWith("'")) {
+      const inner = valStr.endsWith("'") && valStr.length > 1 ? valStr.slice(1, -1) : valStr.slice(1);
+      val = inner.replace(/\\'/g, "'");
     } else if (valStr === 'true') {
       val = true;
     } else if (valStr === 'false') {
@@ -856,10 +860,10 @@ function splitToolNameAndArgs(body: string): { name: string; argsBlock: string }
     return { name: cleanMatch[1], argsBlock: cleanMatch[2] };
   }
 
-  // Case B: Concatenated tool name directly followed by PascalCase / camelCase parameter name + quote-colon
-  // e.g. "list_dirDirectoryPath":"..." or "view_fileAbsolutePath":"..."
+  // Case B: Concatenated tool name directly followed by PascalCase / camelCase parameter name + quote-colon/equal
+  // e.g. "list_dirDirectoryPath":"..." or "list_dirDirectoryPath"="..." or "view_fileAbsolutePath":"..."
   const concatMatch =
-    /^\s*(?:(?:default_api:|custom_api:)?([a-zA-Z0-9_:-]+?))(?=[A-Z][a-zA-Z0-9_]*["']?\s*:)((?:[A-Z][a-zA-Z0-9_]*["']?\s*:)[\s\S]*)$/.exec(
+    /^\s*(?:(?:default_api:|custom_api:)?([a-zA-Z0-9_:-]+?))(?=[A-Z][a-zA-Z0-9_]*["']?\s*[:=])((?:[A-Z][a-zA-Z0-9_]*["']?\s*[:=])[\s\S]*)$/.exec(
       body,
     );
   if (concatMatch && concatMatch[1] && concatMatch[2]) {
@@ -1153,16 +1157,31 @@ function parseDSMLToolCalls(
 
     // Pass 2: XML tool call tags with name attribute: <tool_call name="...">, <function_call name="...">, <tool name="...">, <action name="...">
     const xmlNamedRegex =
-      /<(?:tool_call|function_call|tool|action)\s+name="([^"]+)"[^>]*>([\s\S]*?)<\/(?:tool_call|function_call|tool|action)>/g;
+      /<(?:tool_call|function_call|tool|action)\s+(?:name|tool|function)="([^"]+)"([^>]*)>([\s\S]*?)<\/(?:tool_call|function_call|tool|action)>/g;
     while ((match = xmlNamedRegex.exec(text)) !== null) {
-      if (match[0] && !insideCodeFence(match.index)) pushCall(match[1], match[2], match[0], validateForPass);
+      if (match[0] && !insideCodeFence(match.index)) {
+        const fullArgs = ((match[2] || '') + '\n' + (match[3] || '')).trim();
+        pushCall(match[1], fullArgs, match[0], validateForPass);
+      }
+    }
+
+    // Pass 2b: Self-closing XML tool call tags with name attribute: <tool_call name="..." ... />
+    const xmlNamedSelfClosing =
+      /<(?:tool_call|function_call|tool|action)\s+(?:name|tool|function)="([^"]+)"([^>]*?)\/>/g;
+    while ((match = xmlNamedSelfClosing.exec(text)) !== null) {
+      if (match[0] && !insideCodeFence(match.index)) {
+        pushCall(match[1], match[2].trim(), match[0], validateForPass);
+      }
     }
 
     // Pass 3: Tag name contains the function name: <DSML|_command>{...}</DSML|_command> or <tool_call:funcName>{...}</tool_call:funcName>
     const tagNamedRegex =
-      /<(?:DSML\||tool_call:|function_call:)((?!tool_calls|tool_call|invoke|parameter)[A-Za-z_][\w]*)>([\s\S]*?)<\/(?:DSML\||tool_call:|function_call:)\1>/g;
+      /<(?:DSML\||tool_call:|function_call:)((?!tool_calls|tool_call|invoke|parameter)[A-Za-z_][\w]*)([^>]*)>([\s\S]*?)<\/(?:DSML\||tool_call:|function_call:)\1>/g;
     while ((match = tagNamedRegex.exec(text)) !== null) {
-      if (match[0] && !insideCodeFence(match.index)) pushCall(match[1], match[2], match[0], validateForPass);
+      if (match[0] && !insideCodeFence(match.index)) {
+        const fullArgs = ((match[2] || '') + '\n' + (match[3] || '')).trim();
+        pushCall(match[1], fullArgs, match[0], validateForPass);
+      }
     }
 
     // Pass 3b: Asymmetric close — the closing tag repeats only the function name,
@@ -1170,19 +1189,28 @@ function parseDSMLToolCalls(
     // The symmetric requirement in Pass 3 above misses this, causing the whole
     // block to leak as visible text (see image 2).
     const asymTagNamedRegex =
-      /<(?:DSML\||tool_call:|function_call:)((?!tool_calls|tool_call|invoke|parameter)[A-Za-z_][\w]*)>([\s\S]*?)<\/\1>/g;
+      /<(?:DSML\||tool_call:|function_call:)((?!tool_calls|tool_call|invoke|parameter)[A-Za-z_][\w]*)([^>]*)>([\s\S]*?)<\/\1>/g;
     while ((match = asymTagNamedRegex.exec(text)) !== null) {
-      if (match[0] && !insideCodeFence(match.index)) pushCall(match[1], match[2], match[0], validateForPass);
+      if (match[0] && !insideCodeFence(match.index)) {
+        const fullArgs = ((match[2] || '') + '\n' + (match[3] || '')).trim();
+        pushCall(match[1], fullArgs, match[0], validateForPass);
+      }
     }
 
     // Pass 4: Tag without name attribute: <tool_call>...</tool_call> or <function_call>...</function_call>
-    const genericBlockRegex = /<(?:tool_call|function_call)>([\s\S]*?)<\/(?:tool_call|function_call)>/g;
+    const genericBlockRegex = /<(?:tool_call|function_call)(?:\s+([^>]*))?>([\s\S]*?)<\/(?:tool_call|function_call)>/g;
     while ((match = genericBlockRegex.exec(text)) !== null) {
       if (insideCodeFence(match.index)) continue;
       const full = match[0];
-      const body = match[1].trim();
+      const tagAttrs = match[1] || '';
+      const body = (tagAttrs + '\n' + match[2]).trim();
       const jsonObj = extractJsonObject(body);
-      if (jsonObj && (jsonObj.name || jsonObj.function || jsonObj.tool)) {
+      const nameAttr = /^\s*(?:name|tool|function)=["']([^"']+)["']\s*/.exec(body);
+      if (nameAttr) {
+        const extractedName = nameAttr[1];
+        const restArgs = body.slice(nameAttr[0].length).replace(/\/$/, '').trim();
+        pushCall(extractedName, restArgs, full, validateForPass);
+      } else if (jsonObj && (jsonObj.name || jsonObj.function || jsonObj.tool)) {
         const rawName = (jsonObj.name || jsonObj.function || jsonObj.tool) as string;
         pushCall(rawName, body, full, validateForPass);
       } else {
@@ -1211,14 +1239,22 @@ function parseDSMLToolCalls(
     if (allowUnclosed && functionCalls.length === 0) {
       // Both unclosed <tool_call>{...} and <tool_call:name>{...} are recovered
       // here. The optional name group (match[1]) is preferred over the JSON body.
-      const unclosedRegex = /<(?:tool_call|function_call)(?::([A-Za-z_]\w*))?>([\s\S]+)$/g;
+      const unclosedRegex =
+        /<(?:tool_call|function_call)(?::([A-Za-z_]\w*))?(?:\s+([^>]*))?>([\s\S]*?)(?=(?:<(?:tool_call|function_call)|$))/g;
       while ((match = unclosedRegex.exec(text)) !== null) {
         if (insideCodeFence(match.index)) continue;
         const full = match[0];
         const tagName = match[1];
-        const body = match[2].trim();
+        const tagAttrs = match[2] || '';
+        const innerBody = match[3] || '';
+        const body = (tagAttrs + '\n' + innerBody).trim();
         const jsonObj = extractJsonObject(body);
-        if (tagName && !(jsonObj && jsonObj.name)) {
+        const nameAttr = /^\s*(?:name|tool|function)=["']([^"']+)["']\s*/.exec(body);
+        if (nameAttr) {
+          const extractedName = nameAttr[1];
+          const restArgs = body.slice(nameAttr[0].length).replace(/\/$/, '').trim();
+          pushCall(extractedName, restArgs, full, validateForPass);
+        } else if (tagName && !(jsonObj && jsonObj.name)) {
           pushCall(tagName, body, full, validateForPass);
         } else if (jsonObj && (jsonObj.name || jsonObj.function || jsonObj.tool)) {
           pushCall((jsonObj.name || jsonObj.function || jsonObj.tool) as string, body, full, validateForPass);
