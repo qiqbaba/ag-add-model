@@ -20,10 +20,12 @@ import {
   translatedToolCalls,
   modelToolNames,
   modelToolSchemas,
+  modelSkills,
   stateTimestamps,
   touchStateTimestamp,
   stateKey,
   generateSyntheticCallId,
+  StreamContext,
 } from '../shared';
 // 坑 25：prompt-based 工具调用交付层——LS 对自定义模型只解析响应文本中的
 // <tool_name>{json}</tool_name> 块（详见 prompt-xml.ts 头注）。
@@ -234,27 +236,34 @@ function hasUnclosedToolCallBlock(text: string): boolean {
   const dsmlCloses = (norm.match(/<\/DSML\|/g) || []).length;
   if (dsmlOpens > dsmlCloses) return true;
 
+  // Asymmetric form: <tool_call:name> ... </name> or <tool_call>name> ... </name>
+  const asymOpenRegex =
+    /<(?:tool_call|function_call)(?::|>\s*<?)((?!tool_calls|calls|tool_call|invoke|parameter)[A-Za-z_]\w*)>?/g;
+  let am: RegExpExecArray | null;
+  let asymOpen = 0;
+  let asymClosedWithNamedTagCount = 0;
+  while ((am = asymOpenRegex.exec(text)) !== null) {
+    const name = am[1];
+    const namedCloseRegex = new RegExp(`</(?:${name}|tool_call:${name}|function_call:${name})>`);
+    const symCloseRegex = /<\/(?:tool_call|function_call)>/;
+    const afterText = text.slice(am.index + am[0].length);
+    const nMatch = namedCloseRegex.exec(afterText);
+    const sMatch = symCloseRegex.exec(afterText);
+    if (!nMatch && !sMatch) {
+      asymOpen++;
+    } else if (nMatch && (!sMatch || nMatch.index < sMatch.index)) {
+      if (am[0].includes('>')) {
+        asymClosedWithNamedTagCount++;
+      }
+    }
+  }
+  if (asymOpen > 0) return true;
+
   // Symmetric <tool_call> / <function_call> opens vs closes.
   const symOpens = (text.match(/<(?:tool_call|function_call)[>\s]/g) || []).length;
   const selfCloses = (text.match(/<(?:tool_call|function_call)[^>]*?\/>/g) || []).length;
   const symCloses = (text.match(/<\/(?:tool_call|function_call)>/g) || []).length;
-  if (symOpens - selfCloses > symCloses) return true;
-
-  // Asymmetric colon form <tool_call:name> ... </name> / </tool_call:name>.
-  // The symmetric count above deliberately ignores the colon form (':' is not in
-  // [>\s]), so pair each colon-open with a matching named close here. An
-  // outstanding colon-open means the block is still open. Without this pairing,
-  // a properly-closed <tool_call:name>...</name> would read as opens>closes and
-  // hold the stream forever.
-  const colonOpenRegex = /<(?:tool_call|function_call):([A-Za-z_]\w*)[>\s]/g;
-  let cm: RegExpExecArray | null;
-  let colonOpen = 0;
-  while ((cm = colonOpenRegex.exec(text)) !== null) {
-    const name = cm[1];
-    const namedClose = new RegExp(`</(?:${name}|tool_call:${name}|function_call:${name})>`);
-    if (!namedClose.test(text)) colonOpen++;
-  }
-  if (colonOpen > 0) return true;
+  if (symOpens - selfCloses - asymClosedWithNamedTagCount > symCloses) return true;
 
   // An opening "<call:" with no closing ">" yet (checked relative to the LAST
   // occurrence — the old !text.includes('>') condition was virtually never true).
@@ -263,6 +272,47 @@ function hasUnclosedToolCallBlock(text: string): boolean {
   if (text.includes('```tool_call') && (text.match(/```/g) || []).length % 2 !== 0) return true;
 
   return false;
+}
+
+/**
+ * Strips DSML tool call markup and tags from reasoning/thought text
+ * while preserving natural whitespace and human-readable reasoning prose.
+ */
+export function stripDSMLMarkup(text: string): string {
+  if (!text) return '';
+  let s = normalizeDSMLPipes(text);
+  // Strip complete container blocks
+  s = s.replace(/<DSML\|(?:tool_)?calls\b[^>]*>[\s\S]*?<\/DSML\|(?:tool_)?calls>/gi, '');
+  // Strip complete invoke blocks
+  s = s.replace(/<DSML\|invoke\b[^>]*>[\s\S]*?<\/DSML\|invoke>/gi, '');
+  // Strip parameter blocks
+  s = s.replace(/<DSML\|parameter\b[^>]*>[\s\S]*?<\/DSML\|parameter>/gi, '');
+  // Strip named tag blocks: <DSML|_command>{...}</DSML|_command>
+  s = s.replace(/<DSML\|[A-Za-z_][\w]*\b[^>]*>[\s\S]*?<\/DSML\|[A-Za-z_][\w]*>/gi, '');
+  // Strip standard tool_call/function_call blocks
+  s = s.replace(/<(?:tool_calls?|function_calls?)\b[^>]*>[\s\S]*?<\/(?:tool_calls?|function_calls?)>/gi, '');
+  // Strip any remaining DSML tags (open, close, self-closing)
+  s = s.replace(/<\/?DSML\|[^>]*>/gi, '');
+  // Strip unnormalized pipe variants that may have survived
+  s = s.replace(/<[\s|｜]*\/?[\s|｜]*DSML[\s|｜]*[^>]*>/gi, '');
+  // Strip tool_call tags
+  s = s.replace(/<\/?(?:tool_calls?|function_calls?|tool|action)[^>]*>/gi, '');
+  // Strip think/thought tags
+  s = s.replace(/<\/?(?:think|thought)>/gi, '');
+  // Strip unclosed DSML blocks at the end of text
+  s = s.replace(/<DSML\|[\s\S]*$/gi, '');
+  s = s.replace(/<[\s|｜]*DSML[\s|｜]*[\s\S]*$/gi, '');
+  return s;
+}
+
+/**
+ * Strips DSML and XML tool markup from whole reasoning content,
+ * collapsing excessive newlines and trimming extraneous padding.
+ */
+export function stripDSMLFromReasoning(text: string): string {
+  if (!text) return '';
+  const s = stripDSMLMarkup(text);
+  return s.replace(/\n{3,}/g, '\n\n').trim();
 }
 
 /**
@@ -325,9 +375,12 @@ function findEarliestBareMarkerIdx(combined: string, text: string, prevLen: numb
  * text; plain-led withheld text is body content that was only held back to
  * prevent mid-stream flicker and must be re-emitted with the closing frame.
  */
-function withheldStartsWithMarkup(held: string): boolean {
+function withheldStartsWithMarkup(held: string, toolNames: string[] = []): boolean {
   for (const marker of TOOL_CALL_START_MARKERS) {
     if (held.startsWith(marker)) return true;
+  }
+  for (const name of toolNames) {
+    if (held.startsWith(`<${name}`) || held.startsWith(`</${name}`)) return true;
   }
   return false;
 }
@@ -467,7 +520,7 @@ export function mapGeminiToOpenAI(
           });
           const content = textParts.length > 0 ? textParts.join('') : null;
           const msg: OpenAIMessage = { role: 'assistant', content, tool_calls: toolCalls };
-          if (reasoning_content) msg.reasoning_content = reasoning_content;
+          if (reasoning_content) msg.reasoning_content = stripDSMLFromReasoning(reasoning_content);
           messages.push(msg);
         } else if (hasFunctionResponse) {
           // 坑 25：prompt-XML 模式下，上游模型从未发出过 tool_calls（它以文本
@@ -590,7 +643,7 @@ export function mapGeminiToOpenAI(
             content = hasImage ? (contentParts as OpenAIUserContentPart[]) : textParts.join('\n');
           }
           const msg: OpenAIMessage = { role, content };
-          if (reasoning_content) msg.reasoning_content = reasoning_content;
+          if (reasoning_content) msg.reasoning_content = stripDSMLFromReasoning(reasoning_content);
           messages.push(msg);
         }
       }
@@ -665,7 +718,7 @@ export function mapGeminiToOpenAI(
     if (typeof systemText === 'string' && systemText) {
       const names = new Set<string>();
       const schemaRecord: Record<string, string[]> = {};
-      const defRe = /^([a-z_][a-z0-9_]*):\n<\1>\n/gm;
+      const defRe = /^(?:\d+\.\s*)?([a-z_][a-z0-9_]*):\n<\1>\n/gm;
       let m: RegExpExecArray | null;
       while ((m = defRe.exec(systemText)) !== null) {
         const nm = m[1];
@@ -701,6 +754,18 @@ export function mapGeminiToOpenAI(
         touchStateTimestamp(stateTimestamps.toolNames, stateKeyStr);
         modelToolSchemas.set(stateKeyStr, schemaRecord);
         touchStateTimestamp(stateTimestamps.toolSchemas, stateKeyStr);
+      }
+
+      // 提取可用技能清单（如 - gc (C:\Users\...\SKILL.md)），供断流时抢救无参 view_file
+      const skillsMap = new Map<string, string>();
+      const skillRegex = /-\s*([a-zA-Z0-9_-]+)\s*\(([^)]+SKILL\.md)\)/gi;
+      let sm: RegExpExecArray | null;
+      while ((sm = skillRegex.exec(systemText)) !== null) {
+        skillsMap.set(sm[1].toLowerCase(), sm[2]);
+      }
+      if (skillsMap.size > 0) {
+        modelSkills.set(stateKeyStr, skillsMap);
+        if (stateTimestamps.skills) touchStateTimestamp(stateTimestamps.skills, stateKeyStr);
       }
     }
   }
@@ -860,8 +925,8 @@ function cleanToolName(rawName: string): string {
 }
 
 function splitToolNameAndArgs(body: string): { name: string; argsBlock: string } | null {
-  // Case A: Separated by whitespace, newline, colon, or opening brace
-  const cleanMatch = /^\s*(?:(?:default_api:|custom_api:)?([a-zA-Z0-9_-]+))(?:\s*[:\n\s]\s*|(?=\s*\{))([\s\S]*)$/.exec(
+  // Case A: Separated by whitespace, newline, colon, closing angle bracket, or opening brace
+  const cleanMatch = /^\s*(?:(?:default_api:|custom_api:)?([a-zA-Z0-9_-]+))(?:>\s*|\s*[:\n\s]\s*|(?=\s*\{))([\s\S]*)$/.exec(
     body,
   );
   if (cleanMatch && cleanMatch[1]) {
@@ -1061,6 +1126,60 @@ function parseNativeToolArgs(name: string, raw: string): Record<string, unknown>
 }
 
 /**
+ * 抢救流中断或格式不完整时遗留的孤立裸标签工具调用（如模型仅吐出 `<tool_call>view_file` 或 `<view_file>` 即 stop）。
+ * 从推理思考过程或会话上下文中提取推导出的目标文件路径或命令。
+ */
+function rescueToolArgs(
+  toolName: string,
+  reasoning: string,
+  stateKeyStr: string,
+): Record<string, unknown> | null {
+  if (!reasoning) return null;
+
+  if (toolName === 'view_file') {
+    // 1. 优先检查 reasoning 中是否明确提及了绝对路径
+    const explicitPathMatch = /([a-zA-Z]:[/\\][^\s"'<>]+\.[a-zA-Z0-9_-]+)/.exec(reasoning);
+    if (explicitPathMatch) {
+      return {
+        AbsolutePath: explicitPathMatch[1],
+        IsSkillFile: explicitPathMatch[1].endsWith('SKILL.md'),
+        toolSummary: 'Viewing file',
+        toolAction: 'Reading file',
+      };
+    }
+    // 2. 检查 reasoning 中是否提及了已知技能名（如 "gc skill" / "gc 技能"）
+    const skillsMap = modelSkills.get(stateKeyStr);
+    if (skillsMap && skillsMap.size > 0) {
+      for (const [sName, sPath] of skillsMap.entries()) {
+        const re = new RegExp(`\\b${escapeRegExp(sName)}\\b`, 'i');
+        if (re.test(reasoning)) {
+          return {
+            AbsolutePath: sPath,
+            IsSkillFile: true,
+            toolSummary: `Reading ${sName} skill`,
+            toolAction: 'Viewing skill file',
+          };
+        }
+      }
+    }
+  }
+
+  if (toolName === 'run_command') {
+    // 检查反引号包裹的命令或常规 git 命令
+    const cmdMatch = /`([^`\n]+)`/.exec(reasoning) || /(git\s+[a-z0-9_ -]+)/i.exec(reasoning);
+    if (cmdMatch) {
+      return {
+        CommandLine: cmdMatch[1].trim(),
+        toolSummary: 'Running command',
+        toolAction: 'Executing command',
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
  * Universal text-based tool call parser supporting DSML, XML, GLM, SenseNova, Hermes, Qwen, and Antigravity formats.
  */
 function parseDSMLToolCalls(
@@ -1094,11 +1213,17 @@ function parseDSMLToolCalls(
       return keys.some((k) => declared.includes(k));
     };
 
+    const consumedSpans: { start: number; end: number }[] = [];
+    const isSpanOverlapping = (start: number, end: number): boolean => {
+      return consumedSpans.some((s) => Math.max(start, s.start) < Math.min(end, s.end));
+    };
+
     const pushCall = (
       rawName: string,
       argsBlock: string,
       blockFullText?: string,
       validate?: (name: string, args: Record<string, unknown>) => boolean,
+      span?: { start: number; end: number },
     ): void => {
       const args = parseArgsFromBlock(argsBlock);
       if (!args || Object.keys(args).length === 0) return;
@@ -1112,6 +1237,7 @@ function parseDSMLToolCalls(
       // 此前在此剥除导致 LS 丢弃整个 functionCall → 回退内置模型。
       if (validate && !validate(name, args)) return;
       if (blockFullText) consumedBlocks.push(blockFullText);
+      if (span) consumedSpans.push(span);
       functionCalls.push({ name, args });
     };
 
@@ -1156,7 +1282,13 @@ function parseDSMLToolCalls(
     const dsmlCallRegex = /<DSML\|(?:invoke|tool_call)\s+name="([^"]+)">([\s\S]*?)<\/DSML\|(?:invoke|tool_call)>/g;
     let match: RegExpExecArray | null;
     while ((match = dsmlCallRegex.exec(text)) !== null) {
-      if (match[0] && !insideCodeFence(match.index)) pushCall(match[1], match[2], match[0], validateForPass);
+      if (match[0] && !insideCodeFence(match.index)) {
+        const start = match.index;
+        const end = match.index + match[0].length;
+        if (!isSpanOverlapping(start, end)) {
+          pushCall(match[1], match[2], match[0], validateForPass, { start, end });
+        }
+      }
     }
 
     // Pass 1b: 坑 17 变体——开标签用 `tool name="X"`，闭标签用 `invoke` 甚至
@@ -1165,7 +1297,13 @@ function parseDSMLToolCalls(
     // `</DSML|invoke>` 或 `</DSML|tool name=...>` 为止。
     const dsmlToolNameRegex = /<DSML\|tool\s+name="([^"]+)"[^>]*>([\s\S]*?)<\/DSML\|(?:invoke|tool\s+name="\1")>/g;
     while ((match = dsmlToolNameRegex.exec(text)) !== null) {
-      if (match[0] && !insideCodeFence(match.index)) pushCall(match[1], match[2], match[0], validateForPass);
+      if (match[0] && !insideCodeFence(match.index)) {
+        const start = match.index;
+        const end = match.index + match[0].length;
+        if (!isSpanOverlapping(start, end)) {
+          pushCall(match[1], match[2], match[0], validateForPass, { start, end });
+        }
+      }
     }
 
     // Pass 2: XML tool call tags with name attribute: <tool_call name="...">, <function_call name="...">, <tool name="...">, <action name="...">
@@ -1173,8 +1311,12 @@ function parseDSMLToolCalls(
       /<(?:tool_call|function_call|tool|action)\s+(?:name|tool|function)="([^"]+)"([^>]*)>([\s\S]*?)<\/(?:tool_call|function_call|tool|action)>/g;
     while ((match = xmlNamedRegex.exec(text)) !== null) {
       if (match[0] && !insideCodeFence(match.index)) {
-        const fullArgs = ((match[2] || '') + '\n' + (match[3] || '')).trim();
-        pushCall(match[1], fullArgs, match[0], validateForPass);
+        const start = match.index;
+        const end = match.index + match[0].length;
+        if (!isSpanOverlapping(start, end)) {
+          const fullArgs = ((match[2] || '') + '\n' + (match[3] || '')).trim();
+          pushCall(match[1], fullArgs, match[0], validateForPass, { start, end });
+        }
       }
     }
 
@@ -1183,7 +1325,11 @@ function parseDSMLToolCalls(
       /<(?:tool_call|function_call|tool|action)\s+(?:name|tool|function)="([^"]+)"([^>]*?)\/>/g;
     while ((match = xmlNamedSelfClosing.exec(text)) !== null) {
       if (match[0] && !insideCodeFence(match.index)) {
-        pushCall(match[1], match[2].trim(), match[0], validateForPass);
+        const start = match.index;
+        const end = match.index + match[0].length;
+        if (!isSpanOverlapping(start, end)) {
+          pushCall(match[1], match[2].trim(), match[0], validateForPass, { start, end });
+        }
       }
     }
 
@@ -1192,21 +1338,43 @@ function parseDSMLToolCalls(
       /<(?:DSML\||tool_call:|function_call:)((?!tool_calls|calls|tool_call|invoke|parameter)[A-Za-z_][\w]*)([^>]*)>([\s\S]*?)<\/(?:DSML\||tool_call:|function_call:)\1>/g;
     while ((match = tagNamedRegex.exec(text)) !== null) {
       if (match[0] && !insideCodeFence(match.index)) {
-        const fullArgs = ((match[2] || '') + '\n' + (match[3] || '')).trim();
-        pushCall(match[1], fullArgs, match[0], validateForPass);
+        const start = match.index;
+        const end = match.index + match[0].length;
+        if (!isSpanOverlapping(start, end)) {
+          const fullArgs = ((match[2] || '') + '\n' + (match[3] || '')).trim();
+          pushCall(match[1], fullArgs, match[0], validateForPass, { start, end });
+        }
       }
     }
 
     // Pass 3b: Asymmetric close — the closing tag repeats only the function name,
-    // NOT the full prefix: <tool_call:list_dir>{...}</list_dir> (GLM / SenseNova).
+    // NOT the full prefix: <tool_call:list_dir>{...}</list_dir> or <tool_call>run_command>...JSON...</run_command> (GLM / SenseNova).
     // The symmetric requirement in Pass 3 above misses this, causing the whole
     // block to leak as visible text (see image 2).
     const asymTagNamedRegex =
-      /<(?:DSML\||tool_call:|function_call:)((?!tool_calls|calls|tool_call|invoke|parameter)[A-Za-z_][\w]*)([^>]*)>([\s\S]*?)<\/\1>/g;
+      /<(?:DSML\||(?:tool_call|function_call)(?::|>\s*<?))((?!tool_calls|calls|tool_call|invoke|parameter)[A-Za-z_][\w]*)([^>]*)>([\s\S]*?)<\/(?:(?:tool_call|function_call):)?\1>/g;
     while ((match = asymTagNamedRegex.exec(text)) !== null) {
       if (match[0] && !insideCodeFence(match.index)) {
-        const fullArgs = ((match[2] || '') + '\n' + (match[3] || '')).trim();
-        pushCall(match[1], fullArgs, match[0], validateForPass);
+        const start = match.index;
+        const end = match.index + match[0].length;
+        if (!isSpanOverlapping(start, end)) {
+          const fullArgs = ((match[2] || '') + '\n' + (match[3] || '')).trim();
+          pushCall(match[1], fullArgs, match[0], validateForPass, { start, end });
+        }
+      }
+    }
+
+    // Pass 3c: GLM / SenseNova text tool call format:
+    // <tool_call>name\n{JSON} or <tool_call>name>{JSON}</name> or <tool_call:name>{JSON}
+    const glmTagRegex =
+      /<(?:tool_call|function_call)(?:>\s*|\s+)?((?!tool_calls|calls|tool_call|invoke|parameter)[A-Za-z_][\w]*)>?(?:[\s\n]*)(\{[\s\S]*?\})(?:<\/(?:\1|tool_call|function_call)>)?/g;
+    while ((match = glmTagRegex.exec(text)) !== null) {
+      if (match[0] && !insideCodeFence(match.index)) {
+        const start = match.index;
+        const end = match.index + match[0].length;
+        if (!isSpanOverlapping(start, end)) {
+          pushCall(match[1], match[2].trim(), match[0], validateForPass, { start, end });
+        }
       }
     }
 
@@ -1356,10 +1524,15 @@ export function mapOpenAIToGemini(
   const choice = openAiRes.choices?.[0];
 
   const reasoningFromMessage = choice?.message?.reasoning_content || choice?.message?.reasoning || '';
+  const cleanReasoning = stripDSMLFromReasoning(reasoningFromMessage);
+  if (cleanReasoning) {
+    modelReasoningContent.set(stateKeyStr, cleanReasoning);
+    touchStateTimestamp(stateTimestamps.reasoning, stateKeyStr);
+  }
 
   if (choice?.message?.tool_calls && choice.message.tool_calls.length > 0) {
     const parts: GeminiPart[] = [];
-    if (reasoningFromMessage) parts.push({ text: reasoningFromMessage, thought: true });
+    if (cleanReasoning) parts.push({ text: cleanReasoning, thought: true });
     for (const tc of choice.message.tool_calls) {
       const rawArgs =
         typeof tc.function.arguments === 'string'
@@ -1401,10 +1574,41 @@ export function mapOpenAIToGemini(
 
   // 坑 17：非流式入口同样归一化全角竖线 DSML
   const text = normalizeDSMLPipes(choice?.message?.content || '');
-  const dsml = parseDSMLToolCalls(text, true, getLeanToolNames(stateKeyStr), modelToolSchemas.get(stateKeyStr) ?? null);
+  let dsml = parseDSMLToolCalls(
+    text,
+    true,
+    getLeanToolNames(stateKeyStr),
+    modelToolSchemas.get(stateKeyStr) ?? null,
+  );
+  if ((!dsml || dsml.functionCalls.length === 0) && reasoningFromMessage) {
+    const dsmlInReasoning = parseDSMLToolCalls(
+      normalizeDSMLPipes(reasoningFromMessage),
+      true,
+      getLeanToolNames(stateKeyStr),
+      modelToolSchemas.get(stateKeyStr) ?? null,
+    );
+    if (dsmlInReasoning && dsmlInReasoning.functionCalls.length > 0) {
+      dsml = dsmlInReasoning;
+      log.info(`[Proxy] Salvaged ${dsml.functionCalls.length} tool call(s) from non-streaming reasoning_content`);
+    }
+  }
+  if (!dsml || dsml.functionCalls.length === 0) {
+    const bareCallMatch = /<(?:tool_call|function_call)(?:>\s*|\s+)?([a-z_][a-z0-9_]*)\s*>?$/i.exec(text.trim());
+    if (bareCallMatch) {
+      const toolName = cleanToolName(bareCallMatch[1]);
+      const rescuedArgs = rescueToolArgs(toolName, reasoningFromMessage || '', stateKeyStr);
+      if (rescuedArgs && Object.keys(rescuedArgs).length > 0) {
+        log.info(`[Proxy] Rescued non-streaming bare tool call "${toolName}" with args:`, JSON.stringify(rescuedArgs));
+        dsml = {
+          functionCalls: [{ name: toolName, args: rescuedArgs }],
+          cleanText: text.replace(bareCallMatch[0], '').trim(),
+        };
+      }
+    }
+  }
   if (dsml && dsml.functionCalls.length > 0) {
     const parts: GeminiPart[] = [];
-    if (reasoningFromMessage) parts.push({ text: reasoningFromMessage, thought: true });
+    if (cleanReasoning) parts.push({ text: cleanReasoning, thought: true });
     // 坑 25：非流式同样走 prompt-XML 文本交付（LS 只解析文本标记）；
     // 经 buildFunctionCallParts 统一做翻译/注册/序列化。
     if (dsml.cleanText) parts.push({ text: dsml.cleanText });
@@ -1420,8 +1624,9 @@ export function mapOpenAIToGemini(
   }
 
   const parts: GeminiPart[] = [];
-  if (reasoningFromMessage) parts.push({ text: reasoningFromMessage, thought: true });
-  if (text) parts.push({ text });
+  if (cleanReasoning) parts.push({ text: cleanReasoning, thought: true });
+  const isBareOrphanTag = /^<(?:tool_call|function_call)(?:>\s*|\s+)?[a-z_][a-z0-9_]*>?$/i.test(text.trim());
+  if (text && !isBareOrphanTag) parts.push({ text });
   const finishReasonMap: Record<string, string> = {
     stop: 'STOP',
     tool_calls: 'STOP',
@@ -1529,6 +1734,17 @@ function buildFunctionCallParts(
   return [{ text: serializeToolCallsAsPromptXml(pairs) }];
 }
 
+function finalizeStreamContext(streamId: string, stateKeyStr: string, context: StreamContext): void {
+  if (context.accumulatedReasoning) {
+    const cleanReasoning = stripDSMLFromReasoning(context.accumulatedReasoning);
+    if (cleanReasoning) {
+      modelReasoningContent.set(stateKeyStr, cleanReasoning);
+      touchStateTimestamp(stateTimestamps.reasoning, stateKeyStr);
+    }
+  }
+  activeStreamContexts.delete(streamId);
+}
+
 export function mapOpenAIChunkToGemini(
   chunk: OpenAIResponse,
   modelName: string,
@@ -1563,8 +1779,8 @@ export function mapOpenAIChunkToGemini(
   // 坑 17：帧文本入口即归一化全角竖线 DSML（`<｜DSML｜…>` → `<DSML|…>`），
   // 保证 accumulatedText、holdback、块解析整条链路只处理 ASCII 形态。
   const text = normalizeDSMLPipes(delta?.content || '');
-  const reasoning = delta?.reasoning_content || delta?.reasoning || '';
-  if (reasoning) context.accumulatedReasoning += reasoning;
+  const rawReasoning = delta?.reasoning_content || delta?.reasoning || '';
+  if (rawReasoning) context.accumulatedReasoning += rawReasoning;
   // 坑 16：块解析消费后移出的半截标签（heldSuffixDetached）不在 accumulatedText
   // 里，必须先补回再拼接本帧 text——后续 alreadyInsideToolBlock / bare 边界检测
   // 都基于 accumulatedText，缺了这个 `<` 就会把下一块整段当纯文本泄漏。
@@ -1589,7 +1805,71 @@ export function mapOpenAIChunkToGemini(
   const alreadyInsideToolBlock =
     hasUnclosedToolCallBlock(prevAcc) || (!nativeSeen && hasUnclosedBareToolBlock(prevAcc, leanToolNames));
   const emitParts: GeminiPart[] = [];
-  if (reasoning) emitParts.push({ text: reasoning, thought: true });
+
+  // Stream reasoning with DSML holdback and stripping so thinking UI never leaks markup
+  if (rawReasoning) {
+    const prevReasoningAcc = context.accumulatedReasoning.slice(
+      0,
+      context.accumulatedReasoning.length - rawReasoning.length,
+    );
+    const alreadyInsideReasoningBlock = hasUnclosedToolCallBlock(prevReasoningAcc);
+
+    if (alreadyInsideReasoningBlock) {
+      context.withheldReasoning = (context.withheldReasoning ?? '') + rawReasoning;
+      if (!hasUnclosedToolCallBlock(context.accumulatedReasoning)) {
+        const cleaned = stripDSMLMarkup(context.withheldReasoning);
+        context.withheldReasoning = '';
+        if (cleaned) emitParts.push({ text: cleaned, thought: true });
+      }
+    } else {
+      const heldReasoningSuffix = context.pendingHeldReasoningSuffix ?? '';
+      if (heldReasoningSuffix) {
+        const w = context.withheldReasoning ?? '';
+        context.withheldReasoning = w.slice(0, w.length - heldReasoningSuffix.length);
+        delete context.pendingHeldReasoningSuffix;
+      }
+      const workReasoning = normalizeDSMLPipes(heldReasoningSuffix + rawReasoning);
+
+      let earliestIdx = -1;
+      for (const marker of TOOL_CALL_START_MARKERS) {
+        const idx = workReasoning.indexOf(marker);
+        if (idx >= 0 && (earliestIdx === -1 || idx < earliestIdx)) {
+          earliestIdx = idx;
+        }
+      }
+
+      let safePrefix = earliestIdx >= 0 ? workReasoning.slice(0, earliestIdx) : workReasoning;
+      if (earliestIdx === -1) {
+        let holdLen = 0;
+        for (const marker of TOOL_CALL_START_MARKERS) {
+          const maxCheck = Math.min(marker.length - 1, workReasoning.length);
+          for (let len = maxCheck; len > holdLen; len--) {
+            if (workReasoning.endsWith(marker.slice(0, len))) {
+              holdLen = len;
+              break;
+            }
+          }
+        }
+        if (holdLen > 0) {
+          safePrefix = safePrefix.slice(0, safePrefix.length - holdLen);
+          context.pendingHeldReasoningSuffix = workReasoning.slice(workReasoning.length - holdLen);
+          context.withheldReasoning = (context.withheldReasoning ?? '') + context.pendingHeldReasoningSuffix;
+        } else {
+          delete context.pendingHeldReasoningSuffix;
+        }
+      } else {
+        context.withheldReasoning = (context.withheldReasoning ?? '') + workReasoning.slice(earliestIdx);
+        if (!hasUnclosedToolCallBlock(context.accumulatedReasoning)) {
+          const cleaned = stripDSMLMarkup(context.withheldReasoning);
+          context.withheldReasoning = '';
+          if (cleaned) safePrefix += cleaned;
+        }
+      }
+
+      const visibleReasoning = stripDSMLMarkup(safePrefix);
+      if (visibleReasoning) emitParts.push({ text: visibleReasoning, thought: true });
+    }
+  }
   if (text) {
     if (alreadyInsideToolBlock) {
       // Entire delta is inside an in-flight tool block: hold it into the withheld
@@ -1721,6 +2001,14 @@ export function mapOpenAIChunkToGemini(
   const finishReason = choice.finish_reason;
   const isTerminal = finishReason === 'stop' || finishReason === 'length' || finishReason === 'function_call';
   if (isTerminal) {
+    const heldR = context.withheldReasoning;
+    if (heldR) {
+      const cleanedR = stripDSMLFromReasoning(heldR);
+      if (cleanedR) emitParts.push({ text: cleanedR, thought: true });
+      context.withheldReasoning = '';
+      delete context.pendingHeldReasoningSuffix;
+    }
+
     // Check for pending native tool_calls before closing stream
     // A tool call with empty arguments ("{}"/"") is still a valid no-arg call —
     // don't filter it out (JSON.parse falls back to {} below).
@@ -1767,7 +2055,7 @@ export function mapOpenAIChunkToGemini(
         parts.push(...buildFunctionCallParts([{ name: translated.name, args: translated.args as Record<string, unknown> }], stateKeyStr));
       }
       context.hasEmittedToolCall = true;
-      activeStreamContexts.delete(streamId);
+      finalizeStreamContext(streamId, stateKeyStr, context);
       return { content: { parts, role: 'model' }, finishReason: 'STOP', index: 0 };
     }
     // Check for accumulated text/DSML/GLM tool calls at stream finish (allowUnclosed=true)
@@ -1777,8 +2065,38 @@ export function mapOpenAIChunkToGemini(
         const parts: GeminiPart[] = [...emitParts, ...(context.pendingFunctionCallParts ?? [])];
         parts.push(...buildFunctionCallParts(dsml2.functionCalls, stateKeyStr));
         context.hasEmittedToolCall = true;
-        activeStreamContexts.delete(streamId);
+        finalizeStreamContext(streamId, stateKeyStr, context);
         return { content: { parts, role: 'model' }, finishReason: 'STOP', index: 0 };
+      }
+    }
+    // Salvage tool calls from accumulated reasoning if content had none
+    const hasExistingToolCalls = context.hasEmittedToolCall || (context.pendingFunctionCallParts?.length ?? 0) > 0;
+    if (!hasExistingToolCalls && context.accumulatedReasoning) {
+      const dsmlReasoning = parseDSMLToolCalls(context.accumulatedReasoning, true, leanToolNames, leanParamSchemas);
+      if (dsmlReasoning && dsmlReasoning.functionCalls.length > 0) {
+        log.info(`[Proxy] Salvaged ${dsmlReasoning.functionCalls.length} tool call(s) from accumulated reasoning`);
+        const parts: GeminiPart[] = [...emitParts];
+        parts.push(...buildFunctionCallParts(dsmlReasoning.functionCalls, stateKeyStr));
+        context.hasEmittedToolCall = true;
+        finalizeStreamContext(streamId, stateKeyStr, context);
+        return { content: { parts, role: 'model' }, finishReason: 'STOP', index: 0 };
+      }
+    }
+    // Rescue bare `<tool_call>tool_name` emitted at stream termination without args
+    if (!hasExistingToolCalls) {
+      const tailCandidate = (context.withheldText || context.accumulatedText || '').trim();
+      const bareCallMatch = /<(?:tool_call|function_call)(?:>\s*|\s+)?([a-z_][a-z0-9_]*)\s*>?$/i.exec(tailCandidate);
+      if (bareCallMatch) {
+        const toolName = cleanToolName(bareCallMatch[1]);
+        const rescuedArgs = rescueToolArgs(toolName, context.accumulatedReasoning, stateKeyStr);
+        if (rescuedArgs && Object.keys(rescuedArgs).length > 0) {
+          log.info(`[Proxy] Rescued bare tool call "${toolName}" with args:`, JSON.stringify(rescuedArgs));
+          const parts: GeminiPart[] = [...emitParts];
+          parts.push(...buildFunctionCallParts([{ name: toolName, args: rescuedArgs }], stateKeyStr));
+          context.hasEmittedToolCall = true;
+          finalizeStreamContext(streamId, stateKeyStr, context);
+          return { content: { parts, role: 'model' }, finishReason: 'STOP', index: 0 };
+        }
       }
     }
     // Flush any withheld body/partial-marker text that turned out to be plain
@@ -1787,7 +2105,12 @@ export function mapOpenAIChunkToGemini(
     // verbatim can never duplicate already-emitted text (unlike a prefix-length
     // counter, which mis-aligns once a marker is split across chunk boundaries).
     const held = context.withheldText;
-    if (held) emitParts.push({ text: held });
+    if (held) {
+      const isBareOrphanTag = /^<(?:tool_call|function_call)(?:>\s*|\s+)?[a-z_][a-z0-9_]*>?$/i.test(held.trim());
+      if (!isBareOrphanTag) {
+        emitParts.push({ text: held });
+      }
+    }
     delete context.pendingHeldSuffix;
     context.withheldText = '';
     // Deliver any stashed text-tag calls even when the final frame carries none
@@ -1795,10 +2118,10 @@ export function mapOpenAIChunkToGemini(
     const pendingNow = context.pendingFunctionCallParts ?? [];
     if (pendingNow.length > 0) {
       const parts: GeminiPart[] = [...emitParts, ...pendingNow];
-      activeStreamContexts.delete(streamId);
+      finalizeStreamContext(streamId, stateKeyStr, context);
       return { content: { parts, role: 'model' }, finishReason: 'STOP', index: 0 };
     }
-    activeStreamContexts.delete(streamId);
+    finalizeStreamContext(streamId, stateKeyStr, context);
     return {
       content: { parts: emitParts, role: 'model' },
       finishReason: finishReason === 'length' ? 'MAX_TOKENS' : 'STOP',
@@ -1808,6 +2131,13 @@ export function mapOpenAIChunkToGemini(
 
   // Only emit tool calls when finishReason signals completion (args are fully accumulated)
   if (finishReason === 'tool_calls') {
+    const heldR = context.withheldReasoning;
+    if (heldR) {
+      const cleanedR = stripDSMLFromReasoning(heldR);
+      if (cleanedR) emitParts.push({ text: cleanedR, thought: true });
+      context.withheldReasoning = '';
+      delete context.pendingHeldReasoningSuffix;
+    }
     const parts: GeminiPart[] = [...emitParts, ...(context.pendingFunctionCallParts ?? [])];
     // 补丁2（细化）：同上，纯文本开头的扣留随调用帧补发；标记开头的废弃块不泄漏，
     // 但其残余正文经 salvage 抢救补发。
@@ -1833,7 +2163,6 @@ export function mapOpenAIChunkToGemini(
       touchStateTimestamp(stateTimestamps.toolCallIds, stateKeyStr);
       const translated = translateToolCallToNative(tc.name, args);
       if (translated.name !== tc.name) {
-        translated.args = normalizeToolArgs(translated.name, translated.args) as Record<string, unknown>;
         translatedToolCalls.set(tc.id, {
           originalName: tc.name,
           translatedName: translated.name,
@@ -1846,7 +2175,7 @@ export function mapOpenAIChunkToGemini(
       parts.push(...buildFunctionCallParts([{ name: translated.name, args: translated.args as Record<string, unknown> }], stateKeyStr));
     }
     context.hasEmittedToolCall = true;
-    activeStreamContexts.delete(streamId);
+    finalizeStreamContext(streamId, stateKeyStr, context);
     return { content: { parts, role: 'model' }, finishReason: 'STOP', index: 0 };
   }
 

@@ -96,6 +96,14 @@ function collectTexts(results: (ReturnType<typeof mapOpenAIChunkToGemini>)[]) {
     .join('');
 }
 
+/** 聚合一次流式会话所有 chunk 的思考过程文本（仅 thought） */
+function collectThoughts(results: (ReturnType<typeof mapOpenAIChunkToGemini>)[]) {
+  return results
+    .filter(Boolean)
+    .flatMap((r) => r!.content.parts.filter((p) => p.text && p.thought).map((p) => p.text!))
+    .join('');
+}
+
 /** 声明工具 schema 的会话（让 bare-tag 解析走严格校验路径） */
 function declareSchema(sessionId: string, model: string, tools: { name: string; props: string[] }[]) {
   mapGeminiToOpenAI(
@@ -1282,4 +1290,289 @@ describe('regression l: GLM-5.2 attribute-style tool call syntax and unclosed bl
     });
   });
 });
+
+// ═══ m) DeepSeek V4 Pro 思考过程 DSML 标记泄漏消除与工具抢救 ═══════════════
+describe('regression m: reasoning_content DSML stripping & tool-call salvaging', () => {
+  it('m1 流式：DeepSeek V4 Pro 思考过程分块包含全角 DSML 标签 → 思考过程无 DSML 泄漏，正文保留', () => {
+    const sid = 'reg_dsml_thought_leak';
+    declareSchema(sid, 'deepseek-v4-pro', [
+      { name: 'list_dir', props: ['DirectoryPath', 'toolSummary', 'toolAction'] },
+    ]);
+    const reasoningChunks = [
+      '我在思考如何处理。\n<｜｜DSML',
+      '｜｜ calls>\n<｜｜DSML｜｜ invoke name="list_dir">\n',
+      '<｜｜DSML｜｜ parameter name="DirectoryPath" string="true">d:\\repo</｜｜DSML｜｜ parameter>\n',
+      '</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>\n好，工具已经完成调用准备。',
+    ];
+    const contentChunks = [
+      '开始为您查看目录。\n<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="list_dir">\n',
+      '<｜｜DSML｜｜ parameter name="DirectoryPath" string="true">d:\\repo</｜｜DSML｜｜ parameter>\n',
+      '<｜｜DSML｜｜ parameter name="toolSummary" string="true">List repo</｜｜DSML｜｜ parameter>\n',
+      '<｜｜DSML｜｜ parameter name="toolAction" string="true">Listing</｜｜DSML｜｜ parameter>\n',
+      '</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>',
+    ];
+
+    const chunks = [
+      ...reasoningChunks.map((r) => ({ id: sid, choices: [{ delta: { reasoning_content: r }, index: 0 }] })),
+      ...contentChunks.map((c) => ({ id: sid, choices: [{ delta: { content: c }, index: 0 }] })),
+      { id: sid, choices: [{ delta: {}, finish_reason: 'stop', index: 0 }] },
+    ];
+
+    const results = chunks.map((c) => mapOpenAIChunkToGemini(c, 'deepseek-v4-pro', sid));
+    const thoughts = collectThoughts(results);
+    expect(thoughts).not.toContain('DSML');
+    expect(thoughts).not.toContain('calls');
+    expect(thoughts).not.toContain('invoke');
+    expect(thoughts).not.toContain('parameter');
+    expect(thoughts).toContain('我在思考如何处理。');
+    expect(thoughts).toContain('好，工具已经完成调用准备。');
+
+    const texts = collectTexts(results);
+    expect(texts).not.toContain('DSML');
+    expect(texts).toContain('开始为您查看目录。');
+
+    const fcs = collectFcs(results);
+    expect(fcs.length).toBe(1);
+    expect(fcs[0].name).toBe('list_dir');
+    expect(fcs[0].args.DirectoryPath).toBe('d:\\repo');
+  });
+
+  it('m2 非流式：DeepSeek V4 Pro 非流式响应思考过程含 DSML → 剥离干净且保存纯净会话推理状态', () => {
+    const sid = 'reg_dsml_thought_nonstream';
+    const content = '这是回答结果。';
+    const reasoning_content =
+      '深入思考：\n<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="run_command">\n<｜｜DSML｜｜ parameter name="CommandLine" string="true">git status</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>\n分析结束。';
+    const res = {
+      choices: [{ message: { content, reasoning_content }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
+    };
+    const result = mapOpenAIToGemini(res, 'deepseek-v4-pro', sid);
+    const thoughtParts = result.candidates[0].content.parts.filter((p: any) => p.thought);
+    expect(thoughtParts.length).toBe(1);
+    expect(thoughtParts[0].text).not.toContain('DSML');
+    expect(thoughtParts[0].text).not.toContain('calls');
+    expect(thoughtParts[0].text).not.toContain('invoke');
+    expect(thoughtParts[0].text).toContain('深入思考：');
+    expect(thoughtParts[0].text).toContain('分析结束。');
+
+    const preserved = shared.modelReasoningContent.get(`deepseek-v4-pro|${sid}`);
+    expect(preserved).toBeTruthy();
+    expect(preserved).not.toContain('DSML');
+    expect(preserved).toContain('深入思考：');
+    expect(preserved).toContain('分析结束。');
+  });
+
+  it('m3 流式：仅在 reasoning_content 中输出了 DSML 工具调用（content 无工具）→ 成功抢救并执行工具调用', () => {
+    const sid = 'reg_dsml_salvage_from_reasoning';
+    declareSchema(sid, 'deepseek-v4-pro', [
+      { name: 'run_command', props: ['CommandLine', 'Cwd', 'toolSummary', 'toolAction'] },
+    ]);
+    const reasoning =
+      '需要执行命令检查。\n<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="run_command">\n<｜｜DSML｜｜ parameter name="CommandLine" string="true">git status</｜｜DSML｜｜ parameter>\n<｜｜DSML｜｜ parameter name="Cwd" string="true">d:\\repo</｜｜DSML｜｜ parameter>\n<｜｜DSML｜｜ parameter name="toolSummary" string="true">Check status</｜｜DSML｜｜ parameter>\n<｜｜DSML｜｜ parameter name="toolAction" string="true">Running status</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>';
+    const chunks = [
+      { id: sid, choices: [{ delta: { reasoning_content: reasoning }, index: 0 }] },
+      { id: sid, choices: [{ delta: { content: '请稍候，正在为您执行...' }, index: 0 }] },
+      { id: sid, choices: [{ delta: {}, finish_reason: 'stop', index: 0 }] },
+    ];
+    const results = chunks.map((c) => mapOpenAIChunkToGemini(c, 'deepseek-v4-pro', sid));
+    const fcs = collectFcs(results);
+    expect(fcs.length).toBe(1);
+    expect(fcs[0].name).toBe('run_command');
+    expect(fcs[0].args.CommandLine).toBe('git status');
+
+    const thoughts = collectThoughts(results);
+    expect(thoughts).not.toContain('DSML');
+    expect(thoughts).toContain('需要执行命令检查。');
+  });
+
+  it('l5 真实场景测试：<tool_call>run_command> {"CommandLine":...} </run_command>', () => {
+    const sid = 'reg_glm_tool_call_run_command';
+    declareSchema(sid, 'glm-5.2', [
+      { name: 'run_command', props: ['CommandLine', 'Cwd', 'toolSummary', 'toolAction'] },
+    ]);
+    const chunks = [
+      { id: sid, choices: [{ delta: { content: '现在执行 `git add .` 并提交。<tool_call>run_command> {"CommandLine":"git add .","Cwd":"d:\\\\programme\\\\antigravity-add-model","WaitMsBeforeAsync":5000,"toolSummary":"Git Add All","toolAction":"Staging all changes"} </run_command>' }, index: 0 }] },
+      { id: sid, choices: [{ delta: {}, finish_reason: 'stop', index: 0 }] },
+    ];
+    const results = chunks.map((c) => mapOpenAIChunkToGemini(c, 'glm-5.2', sid));
+    const fcs = collectFcs(results);
+    expect(fcs.length).toBe(1);
+    expect(fcs[0].name).toBe('run_command');
+    expect(fcs[0].args.CommandLine).toBe('git add .');
+    expect(fcs[0].args.Cwd).toBe('d:\\programme\\antigravity-add-model');
+
+    const texts = collectTexts(results);
+    expect(texts).toContain('现在执行 `git add .` 并提交。');
+    expect(texts).not.toContain('<tool_call>');
+    expect(texts).not.toContain('tool_call');
+    expect((texts.match(/CommandLine/g) || []).length).toBe(1); // 坑25：仅在规范块内出现一次
+    expect(shared.activeStreamContexts.size).toBe(0);
+  });
+
+  it('l6 流式分块场景：<tool_call>run_command> 跨 4 个 chunk 拆分 → 无泄漏且正确产出 functionCall', () => {
+    const sid = 'reg_glm_tool_call_split';
+    declareSchema(sid, 'glm-5.2', [
+      { name: 'run_command', props: ['CommandLine', 'Cwd', 'toolSummary', 'toolAction'] },
+    ]);
+    const chunks = [
+      { id: sid, choices: [{ delta: { content: '准备执行命令：' }, index: 0 }] },
+      { id: sid, choices: [{ delta: { content: '<tool_call>run_' }, index: 0 }] },
+      { id: sid, choices: [{ delta: { content: 'command> {"CommandLine":"git status","Cwd":"d:\\\\repo"}' }, index: 0 }] },
+      { id: sid, choices: [{ delta: { content: ' </run_command>' }, index: 0 }] },
+      { id: sid, choices: [{ delta: {}, finish_reason: 'stop', index: 0 }] },
+    ];
+    const results = chunks.map((c) => mapOpenAIChunkToGemini(c, 'glm-5.2', sid));
+    const fcs = collectFcs(results);
+    expect(fcs.length).toBe(1);
+    expect(fcs[0].name).toBe('run_command');
+    expect(fcs[0].args.CommandLine).toBe('git status');
+
+    const texts = collectTexts(results);
+    expect(texts).toContain('准备执行命令：');
+    expect(texts).not.toContain('<tool_call>');
+    expect(texts).not.toContain('tool_call');
+    expect((texts.match(/CommandLine/g) || []).length).toBe(1); // 坑25：仅在规范块内出现一次
+    expect(shared.activeStreamContexts.size).toBe(0);
+  });
+
+  it('l7 编号形式的 systemInstruction 正确提取工具 schema 与可用 skills 映射', () => {
+    const sid = 'reg_numbered_tools_and_skills';
+    const req = {
+      contents: [{ role: 'user', parts: [{ text: 'gc' }] }],
+      systemInstruction: {
+        role: 'user',
+        parts: [
+          {
+            text: [
+              '<skills>',
+              'Available skills:',
+              '- gc (C:\\Users\\21855\\.gemini\\config\\skills\\gc\\SKILL.md): Chinese git commit automation',
+              '- view-file (C:\\Users\\21855\\.gemini\\config\\skills\\view-file\\SKILL.md): View file documentation',
+              '</skills>',
+              '1. run_command:',
+              '<run_command>',
+              '{"properties":{"CommandLine":{"type":"string"},"Cwd":{"type":"string"}}}',
+              '13. view_file:',
+              '<view_file>',
+              '{"properties":{"AbsolutePath":{"type":"string"}}}',
+            ].join('\n'),
+          },
+        ],
+      },
+    };
+    mapGeminiToOpenAI(req as any, 'glm-5.2', sid);
+    const key = shared.stateKey('glm-5.2', sid);
+    const toolNames = shared.modelToolNames.get(key);
+    expect(toolNames).toBeDefined();
+    expect(toolNames?.has('run_command')).toBe(true);
+    expect(toolNames?.has('view_file')).toBe(true);
+
+    const skills = shared.modelSkills.get(key);
+    expect(skills).toBeDefined();
+    expect(skills?.get('gc')).toBe('C:\\Users\\21855\\.gemini\\config\\skills\\gc\\SKILL.md');
+  });
+
+  it('l8 流式仅吐出裸 <tool_call>view_file 且推理提及技能名 → 成功抢救出完整 view_file 工具调用', () => {
+    const sid = 'reg_rescue_bare_view_file_stream';
+    const key = shared.stateKey('glm-5.2', sid);
+    const skillsMap = new Map<string, string>();
+    skillsMap.set('gc', 'C:\\Users\\21855\\.gemini\\config\\skills\\gc\\SKILL.md');
+    shared.modelSkills.set(key, skillsMap);
+    declareSchema(sid, 'glm-5.2', [
+      { name: 'view_file', props: ['AbsolutePath', 'IsSkillFile', 'toolSummary', 'toolAction'] },
+    ]);
+
+    const chunks = [
+      {
+        id: sid,
+        choices: [
+          {
+            delta: {
+              reasoning_content: 'The user sent gc command. According to the global rules and the gc skill, I need to read the gc skill first.',
+            },
+            index: 0,
+          },
+        ],
+      },
+      {
+        id: sid,
+        choices: [
+          {
+            delta: {
+              content: '<tool_call>view_file',
+            },
+            index: 0,
+          },
+        ],
+      },
+      {
+        id: sid,
+        choices: [
+          {
+            delta: {},
+            finish_reason: 'stop',
+            index: 0,
+          },
+        ],
+      },
+    ];
+
+    const results = chunks.map((c) => mapOpenAIChunkToGemini(c, 'glm-5.2', sid));
+    const fcs = collectFcs(results);
+    expect(fcs.length).toBe(1);
+    expect(fcs[0].name).toBe('view_file');
+    expect(fcs[0].args.AbsolutePath).toBe('C:\\Users\\21855\\.gemini\\config\\skills\\gc\\SKILL.md');
+    expect(fcs[0].args.IsSkillFile).toBe(true);
+
+    const texts = collectTexts(results);
+    expect(texts).not.toContain('<tool_call>');
+    expect(texts).not.toContain('<tool_call>view_file');
+    expect(shared.activeStreamContexts.size).toBe(0);
+  });
+
+  it('l9 非流式裸 <tool_call>view_file 且推理提及技能名 → 成功抢救为合法的 view_file 工具调用', () => {
+    const sid = 'reg_rescue_bare_view_file_sync';
+    const key = shared.stateKey('glm-5.2', sid);
+    const skillsMap = new Map<string, string>();
+    skillsMap.set('gc', 'C:\\Users\\21855\\.gemini\\config\\skills\\gc\\SKILL.md');
+    shared.modelSkills.set(key, skillsMap);
+    declareSchema(sid, 'glm-5.2', [
+      { name: 'view_file', props: ['AbsolutePath', 'IsSkillFile', 'toolSummary', 'toolAction'] },
+    ]);
+
+    const res = {
+      choices: [
+        {
+          message: {
+            reasoning_content: 'Let me read the gc skill first to know what to do.',
+            content: '<tool_call>view_file',
+          },
+          finish_reason: 'stop',
+          index: 0,
+        },
+      ],
+      usage: { prompt_tokens: 10, completion_tokens: 15, total_tokens: 25 },
+    };
+
+    const out = mapOpenAIToGemini(res, 'glm-5.2', sid);
+    const candidate = out.candidates[0];
+    const xml = candidate.content.parts.filter((p: any) => p.text && !p.thought).map((p: any) => p.text).join('');
+    const fcs: { name: string; args: Record<string, unknown> }[] = [];
+    const re = /<([a-z_][a-z0-9_]*)>\n([\s\S]*?)\n<\/\1>/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(xml)) !== null) {
+      try {
+        fcs.push({ name: m[1], args: JSON.parse(m[2]) });
+      } catch {}
+    }
+
+    expect(fcs.length).toBe(1);
+    expect(fcs[0].name).toBe('view_file');
+    expect(fcs[0].args.AbsolutePath).toBe('C:\\Users\\21855\\.gemini\\config\\skills\\gc\\SKILL.md');
+
+    expect(xml).not.toContain('<tool_call>view_file');
+  });
+});
+
+
 

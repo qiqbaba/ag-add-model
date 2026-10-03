@@ -30,6 +30,10 @@ export interface StreamContext {
    * 使 prevAcc/workBase 映射与 work 保持一致。
    */
   heldSuffixDetached?: boolean;
+  /** Reasoning text withheld by the emitter (inside an in-flight tool block or partial marker). */
+  withheldReasoning?: string;
+  /** Trailing partial tool-call marker held back in reasoning stream. */
+  pendingHeldReasoningSuffix?: string;
 }
 
 /** Minimal shape of a Gemini part pending delivery (kept structural to avoid import cycles). */
@@ -52,6 +56,8 @@ export interface StateTimestamps {
   toolNames: Map<string, number>;
   /** keyed by stateKey(modelName, sessionId) */
   toolSchemas: Map<string, number>;
+  /** keyed by stateKey(modelName, sessionId) */
+  skills?: Map<string, number>;
 }
 
 export interface TranslatedCallInfo {
@@ -114,6 +120,9 @@ export const modelToolNames = new Map<string, Set<string>>();
 /** stateKey(modelName, sessionId) → declared tool parameter names: toolName → [paramName, ...] */
 export const modelToolSchemas = new Map<string, Record<string, string[]>>();
 
+/** stateKey(modelName, sessionId) → discovered skills: skillName → skillFilePath */
+export const modelSkills = new Map<string, Map<string, string>>();
+
 /** State entry timestamps for periodic cleanup */
 export const stateTimestamps: StateTimestamps = {
   streamCtx: new Map(),
@@ -122,6 +131,7 @@ export const stateTimestamps: StateTimestamps = {
   reasoning: new Map(),
   toolNames: new Map(),
   toolSchemas: new Map(),
+  skills: new Map(),
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -175,6 +185,14 @@ export function startCleanupInterval(): void {
       if (now - ts > TOOL_TTL) {
         modelToolSchemas.delete(key);
         stateTimestamps.toolSchemas.delete(key);
+      }
+    }
+    if (stateTimestamps.skills) {
+      for (const [key, ts] of stateTimestamps.skills) {
+        if (now - ts > TOOL_TTL) {
+          modelSkills.delete(key);
+          stateTimestamps.skills.delete(key);
+        }
       }
     }
   }, 300_000);

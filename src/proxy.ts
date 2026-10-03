@@ -82,6 +82,7 @@ import { detectModelCapabilities } from './proxy/modelUtils';
 
 // Provider translator registry (auto-discovers translators from proxy/translators/)
 import * as registry from './proxy/registry';
+import { stripDSMLFromReasoning } from './proxy/translators/openai';
 
 // Runtime port ↔ settings.json synchronization (keeps jetski.cloudCodeUrl in sync)
 import { syncActivePort, syncSettingsJson } from './proxy/settingsSync';
@@ -1078,9 +1079,12 @@ let lastUpstreamUsage: { promptTokenCount: number; candidatesTokenCount: number;
             (parsed as { choices?: { message?: { reasoning_content?: string; reasoning?: string } }[] }).choices?.[0]
               ?.message?.reasoning;
           if (reasoning) {
-            const reasonKey = stateKey(model.name, sessionId);
-            modelReasoningContent.set(reasonKey, reasoning);
-            touchStateTimestamp(stateTimestamps.reasoning, reasonKey);
+            const clean = stripDSMLFromReasoning(reasoning);
+            if (clean) {
+              const reasonKey = stateKey(model.name, sessionId);
+              modelReasoningContent.set(reasonKey, clean);
+              touchStateTimestamp(stateTimestamps.reasoning, reasonKey);
+            }
           }
 
           const providerForResponse =
