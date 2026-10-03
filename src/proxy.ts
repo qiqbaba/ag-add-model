@@ -121,6 +121,7 @@ import {
   saveCustomModel,
   saveCustomModels,
   deleteCustomModel,
+  deleteCustomModels,
   getRawConfig,
   saveRawConfig,
   getSystemInfo,
@@ -137,6 +138,7 @@ export {
   saveCustomModel,
   saveCustomModels,
   deleteCustomModel,
+  deleteCustomModels,
   getRawConfig,
   saveRawConfig,
   getSystemInfo,
@@ -1599,20 +1601,38 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
     if (req.method === 'DELETE' && reqPathname.startsWith('/api/models')) {
       try {
         let targetName = '';
+        let targetNames: string[] = [];
         if (bodyStr && bodyStr.trim().length > 0) {
           try {
-            const bodyJson = JSON.parse(bodyStr) as { name?: string };
+            const bodyJson = JSON.parse(bodyStr) as { name?: string; names?: string[] };
             targetName = bodyJson.name || '';
+            if (Array.isArray(bodyJson.names)) {
+              targetNames = bodyJson.names.filter((n) => typeof n === 'string' && n.trim().length > 0);
+            }
           } catch (_e) {
             // body is not json
           }
         }
-        if (!targetName) {
+        if (!targetName && targetNames.length === 0) {
           targetName = parsedReqUrl.searchParams.get('name') || '';
           if (!targetName && reqPathname.startsWith('/api/models/')) {
             targetName = decodeURIComponent(reqPathname.slice('/api/models/'.length));
           }
         }
+
+        if (targetNames.length > 0) {
+          const result = deleteCustomModels(targetNames);
+          if (result.success) {
+            log.info(`[Proxy] Batch deleted ${result.deletedCount} custom models`);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(result));
+          } else {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(result));
+          }
+          return;
+        }
+
         if (!targetName) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: false, error: 'Missing model name to delete' }));

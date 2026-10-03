@@ -32,6 +32,7 @@ import {
   generatePlaceholderId,
   saveCustomModel,
   deleteCustomModel,
+  deleteCustomModels,
   getModelsViewModel,
   getRawConfig,
   saveRawConfig,
@@ -178,6 +179,30 @@ describe('modelConfigManager', () => {
     const res = deleteCustomModel('models/non-existent');
     expect(res.success).toBe(false);
     expect(res.error).toContain('未找到模型');
+  });
+
+  it('should batch delete multiple models via deleteCustomModels', () => {
+    saveCustomModel({
+      name: 'models/model-a',
+      displayName: 'Model A',
+      provider: 'openai',
+      apiUrl: 'https://api.openai.com/v1',
+      apiKey: 'sk-test',
+    });
+    saveCustomModel({
+      name: 'models/model-b',
+      displayName: 'Model B',
+      provider: 'openai',
+      apiUrl: 'https://api.openai.com/v1',
+      apiKey: 'sk-test',
+    });
+    expect(readDecryptedModels().length).toBe(3);
+
+    const res = deleteCustomModels(['models/model-a', 'models/model-b']);
+    expect(res.success).toBe(true);
+    expect(res.deletedCount).toBe(2);
+    expect(res.remainingCount).toBe(1);
+    expect(readDecryptedModels().length).toBe(1);
   });
 
   it('should read and save raw JSON config', () => {

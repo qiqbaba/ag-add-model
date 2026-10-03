@@ -480,6 +480,61 @@ export function deleteCustomModel(modelName: string): { success: boolean; error?
 }
 
 /**
+ * Deletes multiple custom models by name or slug in a single atomic transaction.
+ */
+export function deleteCustomModels(modelNames: string[]): {
+  success: boolean;
+  error?: string;
+  deletedCount: number;
+  remainingCount: number;
+} {
+  const filePath = getCustomModelsPath();
+  const readResult = readModelsFile();
+  const currentModels = readResult.models;
+  const targetSet = new Set<string>();
+
+  for (const name of modelNames) {
+    const clean = (name || '').trim();
+    if (clean) {
+      targetSet.add(clean);
+      targetSet.add(clean.startsWith('models/') ? clean.slice('models/'.length) : `models/${clean}`);
+    }
+  }
+
+  if (targetSet.size === 0) {
+    return { success: false, error: '未提供要删除的模型名称', deletedCount: 0, remainingCount: currentModels.length };
+  }
+
+  const filtered = currentModels.filter(
+    (m) => !targetSet.has(m.name) && !targetSet.has(generateSlug(m)),
+  );
+
+  const deletedCount = currentModels.length - filtered.length;
+  if (deletedCount === 0) {
+    return { success: false, error: '未找到匹配的模型', deletedCount: 0, remainingCount: currentModels.length };
+  }
+
+  const delBlocker = getWriteBlocker(filtered, readResult.parseError);
+  if (delBlocker) {
+    return { success: false, error: delBlocker, deletedCount: 0, remainingCount: currentModels.length };
+  }
+
+  try {
+    cryptoStore.backupFile(filePath);
+    const encrypted = cryptoStore.encryptModels(filtered);
+    writeFileAtomic(filePath, JSON.stringify({ models: encrypted }, null, 2));
+    return { success: true, deletedCount, remainingCount: filtered.length };
+  } catch (err) {
+    return {
+      success: false,
+      error: `批量删除失败: ${(err as Error).message}`,
+      deletedCount: 0,
+      remainingCount: currentModels.length,
+    };
+  }
+}
+
+/**
  * Gets the raw content of custom_models.json.
  */
 export function getRawConfig(): string {

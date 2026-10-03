@@ -648,6 +648,13 @@ export function renderDashboardHtml(): string {
       text-overflow: ellipsis;
     }
 
+    .platform-header-right {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+
     .platform-count {
       font-size: 0.78rem;
       color: var(--text-muted);
@@ -1677,7 +1684,13 @@ export function renderDashboardHtml(): string {
                 <div class="platform-name">\${escapeHtml(g.label)}</div>
                 <span class="provider-badge \${prov}">\${escapeHtml(g.provider)}</span>
               </div>
-              <div class="platform-count">\${g.models.length} 个模型</div>
+              <div class="platform-header-right">
+                <button id="btn-del-prov-\${gid}" class="btn btn-danger btn-sm" data-key="\${escapeHtml(g.key)}" data-label="\${escapeHtml(g.label)}" onclick="handleDeleteProviderClick(this)" title="一键删除此供应商及旗下所有模型">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                  删除供应商
+                </button>
+                <div class="platform-count">\${g.models.length} 个模型</div>
+              </div>
             </div>
             <div class="model-rows">
               \${g.models.map(m => renderModelRow(m)).join('')}
@@ -2185,6 +2198,46 @@ export function renderDashboardHtml(): string {
         }
       } catch (e) {
         showToast('网络请求失败: ' + e.message, 'error');
+      }
+    }
+
+    // ─── Delete Provider ─────────────────────────────────────
+    async function handleDeleteProviderClick(btn) {
+      const groupKey = btn.getAttribute('data-key');
+      const providerLabel = btn.getAttribute('data-label') || '此供应商';
+      const modelsToDelete = state.models.filter(m => getPlatformInfo(m).key === groupKey);
+
+      if (!modelsToDelete.length) {
+        showToast('该供应商下未找到任何模型', 'error');
+        return;
+      }
+
+      const count = modelsToDelete.length;
+      if (!confirm(\`确定要删除供应商【\${providerLabel}】吗？\\n将一键删除该供应商旗下的全部 \${count} 个模型配置，此操作无法撤销。\`)) {
+        return;
+      }
+
+      btn.disabled = true;
+      const names = modelsToDelete.map(m => m.name);
+
+      try {
+        const res = await fetch('/api/models', {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ names })
+        });
+        const json = await res.json();
+
+        if (res.ok && json.success) {
+          showToast(\`供应商【\${providerLabel}】已删除，共清理 \${json.deletedCount || count} 个模型！\`, 'success');
+          await fetchModels();
+        } else {
+          showToast('删除失败: ' + (json.error || '未知错误'), 'error');
+        }
+      } catch (e) {
+        showToast('网络请求失败: ' + e.message, 'error');
+      } finally {
+        if (btn) btn.disabled = false;
       }
     }
 

@@ -116,6 +116,8 @@ describe('Dashboard and REST API endpoints', () => {
     expect(res.headers['content-type']).toContain('text/html');
     expect(res.body).toMatch(/Antigravity (Models|IDE 自定义模型)/);
     expect(res.body).toContain('快速预设模板');
+    expect(res.body).toContain('删除供应商');
+    expect(res.body).toContain('handleDeleteProviderClick');
   });
 
   it('should return system status on GET /api/status', async () => {
@@ -167,6 +169,30 @@ describe('Dashboard and REST API endpoints', () => {
     expect(added.supportsThinking).toBe(true);
     expect(added.capabilities.supportsImages).toBe(true);
     expect(added.capabilities.isThinking).toBe(true);
+  });
+
+  it('should batch delete multiple models via DELETE /api/models with names array', async () => {
+    await makeRequest(
+      'POST',
+      '/api/models',
+      JSON.stringify({
+        name: 'models/deepseek-v3',
+        displayName: 'DeepSeek V3',
+        provider: 'openai',
+        apiUrl: 'https://api.deepseek.com/v1',
+        apiKey: 'sk-ds-test',
+      }),
+    );
+    const res = await makeRequest(
+      'DELETE',
+      '/api/models',
+      JSON.stringify({ names: ['models/deepseek-v3', 'models/gpt-4o'] }),
+    );
+    expect(res.statusCode).toBe(200);
+    const json = JSON.parse(res.body);
+    expect(json.success).toBe(true);
+    expect(json.deletedCount).toBe(2);
+    expect(json.remainingCount).toBe(0);
   });
 
   it('should delete a model via DELETE /api/models', async () => {
