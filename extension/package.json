@@ -1,0 +1,74 @@
+{
+  "name": "antigravity-token-meter",
+  "displayName": "Antigravity Token Meter",
+  "description": "在状态栏实时显示反重力 Agent 每轮的 token 用量与上下文占用（数据来自本地代理）",
+  "version": "0.1.0",
+  "publisher": "local",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.68.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:antigravityTokenMeter.openDashboard",
+    "onCommand:antigravityTokenMeter.showDetails",
+    "onCommand:antigravityTokenMeter.reset"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "antigravityTokenMeter.showDetails",
+        "title": "Token Meter: 查看本轮明细",
+        "category": "Antigravity"
+      },
+      {
+        "command": "antigravityTokenMeter.openDashboard",
+        "title": "Token Meter: 打开代理管理面板",
+        "category": "Antigravity"
+      },
+      {
+        "command": "antigravityTokenMeter.reset",
+        "title": "Token Meter: 重置统计",
+        "category": "Antigravity"
+      }
+    ],
+    "configuration": {
+      "title": "Antigravity Token Meter",
+      "properties": {
+        "antigravityTokenMeter.proxyPort": {
+          "type": "number",
+          "default": 0,
+          "markdownDescription": "本地代理端口。`0` 表示自动读取 `~/.gemini/antigravity/active_port`，读取失败时回退到 `50999`。"
+        },
+        "antigravityTokenMeter.contextWindow": {
+          "type": "number",
+          "default": 0,
+          "markdownDescription": "手动指定上下文窗口大小（token）。`0` 表示自动：使用代理推断值（优先级：custom_models.json 的 `contextWindow` → 本地模型目录（如 `~/.dsh/settings.yaml`）→ 官方模型列表 `maxTokens` → 内置名称启发式）。"
+        },
+        "antigravityTokenMeter.refreshIntervalMs": {
+          "type": "number",
+          "default": 1500,
+          "description": "轮询代理统计接口的间隔（毫秒）。"
+        },
+        "antigravityTokenMeter.warnThreshold": {
+          "type": "number",
+          "default": 80,
+          "description": "上下文占用率超过该百分比时，状态栏项变色告警。"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.68.0",
+    "typescript": "^5.4.0"
+  }
+}

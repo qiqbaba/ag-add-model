@@ -32,6 +32,11 @@ export interface CustomModel {
   _placeholderId?: string;
   timeout?: number;
   maxRetries?: number;
+  /**
+   * 可选：上下文窗口大小（token）。留空时由 modelWindow.ts 依次按
+   * 本地模型目录 → 官方模型列表 → 名称启发式 自动推断。
+   */
+  contextWindow?: number;
   /** 可选：模型选择器中的分组名（二级菜单名）。缺省时按 apiUrl 自动推断平台。 */
   group?: string;
 }
@@ -81,6 +86,33 @@ import * as registry from './proxy/registry';
 // Runtime port ↔ settings.json synchronization (keeps jetski.cloudCodeUrl in sync)
 import { syncActivePort, syncSettingsJson } from './proxy/settingsSync';
 export { syncActivePort, syncSettingsJson, getSettingsPath, getActivePortPath } from './proxy/settingsSync';
+
+// Token usage accounting (consumed by the companion status-bar extension)
+import { recordTokenUsage, recordRequestEstimate, getTokenStatsSnapshot, resetTokenStats } from './proxy/tokenStats';
+export {
+  recordTokenUsage,
+  recordRequestEstimate,
+  getTokenStatsSnapshot,
+  resetTokenStats,
+  type TokenStatsSnapshot,
+  type TurnTokenStats,
+} from './proxy/tokenStats';
+
+// Context-window resolution (local model catalog / official model list / heuristic)
+import {
+  resolveContextWindow,
+  registerOfficialContextWindows,
+  type ResolvedContextWindow,
+} from './proxy/modelWindow';
+export {
+  resolveContextWindow,
+  registerOfficialContextWindows,
+  getLocalCatalog,
+  invalidateCatalogCache,
+  DEFAULT_CONTEXT_WINDOW,
+  type ContextWindowSource,
+  type ResolvedContextWindow,
+} from './proxy/modelWindow';
 
 // Visual configuration dashboard & model management
 import { renderDashboardHtml } from './proxy/dashboardHtml';
@@ -332,6 +364,133 @@ function decompressResponseBody(
   return { text: '', decompressed: false };
 }
 
+// ─── Token usage tee (official Gemini pass-through) ────────────────────────
+
+interface GeminiUsagePayload {
+  promptTokenCount?: number;
+  candidatesTokenCount?: number;
+  thoughtsTokenCount?: number;
+  cachedContentTokenCount?: number;
+  totalTokenCount?: number;
+}
+
+/**
+ * Extracts the *last* complete `"usageMetadata": {...}` object from a text
+ * buffer. Returns null while the object is still incomplete, so the caller can
+ * keep the buffer and retry on the next chunk.
+ */
+function parseUsageMetadataFromText(text: string): GeminiUsagePayload | null {
+  const at = text.lastIndexOf('"usageMetadata"');
+  if (at < 0) return null;
+  const start = text.indexOf('{', at);
+  if (start < 0) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) {
+        try {
+          return JSON.parse(text.slice(start, i + 1)) as GeminiUsagePayload;
+        } catch {
+          return null;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Best-effort model label for the official Gemini pass-through. Used only to
+ * tag token stats -- the LS puts the model slug in the Cloud Code envelope.
+ */
+function extractModelLabel(reqBody: Buffer | undefined, url: string): string {
+  if (reqBody && reqBody.length > 0) {
+    const match = /"(?:model|modelId|model_id)"\s*:\s*"([^"]{1,120})"/.exec(reqBody.toString('utf-8'));
+    if (match) return match[1];
+  }
+  const fromUrl = /\/(?:models\/)?([^/:?]+):(?:stream)?[gG]enerateContent/.exec(url);
+  return fromUrl ? fromUrl[1] : 'google-gemini';
+}
+
+/**
+ * Non-intrusive tee over the upstream Gemini stream. The payload keeps flowing
+ * to the Language Server untouched (the original `pipe(res)` is preserved);
+ * a second, decompressing consumer just watches for `usageMetadata`.
+ *
+ * Official Gemini always reports `usageMetadata` -- in the final chunk of a
+ * `streamGenerateContent` and in the body of a `generateContent` -- so this is
+ * the authoritative source for the IDE's own models.
+ */
+function attachUsageTee(
+  upstream: http.IncomingMessage,
+  label: string,
+  windowInfo: ResolvedContextWindow,
+): void {
+  let scanner: NodeJS.ReadableStream = upstream;
+  try {
+    const encoding = String(upstream.headers['content-encoding'] || '').toLowerCase();
+    if (encoding.includes('br')) scanner = upstream.pipe(zlib.createBrotliDecompress());
+    else if (encoding.includes('gzip')) scanner = upstream.pipe(zlib.createGunzip());
+    else if (encoding.includes('deflate')) scanner = upstream.pipe(zlib.createInflate());
+  } catch (e) {
+    log.debug('[Proxy] usage tee unavailable:', (e as Error).message);
+    return;
+  }
+
+  let buffer = '';
+  let lastUsage: GeminiUsagePayload | null = null;
+
+  scanner.on('data', (chunk: Buffer) => {
+    buffer += chunk.toString('utf-8');
+    // Drop everything before the last usage frame: the object may still be
+    // truncated, and the next chunk is appended to this suffix.
+    const at = buffer.lastIndexOf('"usageMetadata"');
+    if (at >= 0) buffer = buffer.slice(at);
+    if (buffer.length > 2 * 1024 * 1024) buffer = buffer.slice(-64 * 1024);
+
+    const parsed = parseUsageMetadataFromText(buffer);
+    if (parsed) {
+      lastUsage = parsed;
+      buffer = '';
+    }
+  });
+
+  scanner.on('end', () => {
+    if (!lastUsage) return;
+    recordTokenUsage({
+      model: label,
+      displayName: label,
+      provider: 'google',
+      promptTokenCount: lastUsage.promptTokenCount,
+      candidatesTokenCount: lastUsage.candidatesTokenCount,
+      thoughtsTokenCount: lastUsage.thoughtsTokenCount,
+      cachedContentTokenCount: lastUsage.cachedContentTokenCount,
+      totalTokenCount: lastUsage.totalTokenCount,
+      authoritative: true,
+      contextWindow: windowInfo.contextWindow,
+      contextWindowSource: windowInfo.source,
+    });
+  });
+
+  scanner.on('error', (e) => log.debug('[Proxy] usage tee error:', (e as Error).message));
+}
+
 function proxyToGoogle(req: http.IncomingMessage, res: http.ServerResponse, reqBody: Buffer): void {
   const isCloudCodeUrl = req.url!.includes('v1internal') || req.url!.includes('daily-cloudcode');
   // 调试（raw_stream.flag 开启时生效）：dump LS 轨迹上报——LS 视角步骤/工具
@@ -420,6 +579,21 @@ function proxyToGoogle(req: http.IncomingMessage, res: http.ServerResponse, reqB
       });
     } else {
       res.writeHead(proxyRes.statusCode || 200, proxyRes.headers as Record<string, string>);
+      if (isGeneration) {
+        // Token accounting: the request body gives the gauge an immediate
+        // context-size reading; the tee below refines it with the real
+        // `usageMetadata` once the upstream finishes.
+        const label = extractModelLabel(reqBody, req.url || '');
+        const googleWindow = resolveContextWindow({ name: label, displayName: label, slug: label });
+        recordRequestEstimate({
+          model: label,
+          provider: 'google',
+          requestBytes: reqBody ? reqBody.length : 0,
+          contextWindow: googleWindow.contextWindow,
+          contextWindowSource: googleWindow.source,
+        });
+        attachUsageTee(proxyRes, label, googleWindow);
+      }
       proxyRes.pipe(res);
     }
   });
@@ -560,6 +734,31 @@ function handleCustomModelRequest(
 
   if (isStream && registry.supportsStreaming(provider)) {
     (payload as Record<string, unknown>).stream = true;
+  }
+
+  // Context window: resolved once per turn so every record below reports the
+  // same value (explicit config -> local catalog -> official list -> heuristic).
+  const windowInfo: ResolvedContextWindow = resolveContextWindow({
+    explicit: model.contextWindow,
+    externalModelName: model.externalModelName,
+    name: model.name,
+    displayName: model.displayName,
+    slug: model._slug,
+  });
+
+  // Token accounting: for OpenAI-compatible upstreams the request body is the
+  // only reliable context-size signal (they omit `usage` unless the caller opts
+  // in via `stream_options.include_usage`, which this proxy does not send).
+  // Recorded once per turn -- retries must not double-count.
+  if (retryCount === 0) {
+    recordRequestEstimate({
+      model: model.name,
+      displayName: model.displayName,
+      provider: model.provider,
+      requestBytes: Buffer.byteLength(JSON.stringify(payload), 'utf-8'),
+      contextWindow: windowInfo.contextWindow,
+      contextWindowSource: windowInfo.source,
+    });
   }
 
   let finalUrlStr = model.apiUrl;
@@ -758,6 +957,20 @@ let lastUpstreamUsage: { promptTokenCount: number; candidatesTokenCount: number;
 
       apiRes.on('end', () => {
         buffer += decoder.end();
+        // 真实 usage（上游在流尾返回时）覆盖请求侧估算
+        if (lastUpstreamUsage) {
+          recordTokenUsage({
+            model: model.name,
+            displayName: model.displayName,
+            provider: model.provider,
+            promptTokenCount: lastUpstreamUsage.promptTokenCount,
+            candidatesTokenCount: lastUpstreamUsage.candidatesTokenCount,
+            totalTokenCount: lastUpstreamUsage.totalTokenCount,
+            authoritative: true,
+            contextWindow: windowInfo.contextWindow,
+            contextWindowSource: windowInfo.source,
+          });
+        }
         if (buffer.trim().startsWith('data: ')) {
           const dataStr = buffer.trim().substring(6).trim();
           if (dataStr !== '[DONE]') {
@@ -871,6 +1084,24 @@ let lastUpstreamUsage: { promptTokenCount: number; candidatesTokenCount: number;
           const providerForResponse =
             model.provider === 'custom' || model.provider === 'openrouter' ? 'openai' : model.provider;
           const mapped = registry.translateResponse(providerForResponse, parsed, model.name, sessionId);
+
+          // 非流式响应携带真实 usage：覆盖请求侧估算
+          const mappedUsage = (mapped as { usageMetadata?: GeminiUsagePayload } | null)?.usageMetadata;
+          if (mappedUsage) {
+            recordTokenUsage({
+              model: model.name,
+              displayName: model.displayName,
+              provider: model.provider,
+              promptTokenCount: mappedUsage.promptTokenCount,
+              candidatesTokenCount: mappedUsage.candidatesTokenCount,
+              thoughtsTokenCount: mappedUsage.thoughtsTokenCount,
+              cachedContentTokenCount: mappedUsage.cachedContentTokenCount,
+              totalTokenCount: mappedUsage.totalTokenCount,
+              authoritative: true,
+              contextWindow: windowInfo.contextWindow,
+              contextWindowSource: windowInfo.source,
+            });
+          }
 
           const cloudCodeResponse = {
             response: mapped,
@@ -1315,6 +1546,20 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
       const info = getSystemInfo(proxyPort);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(info));
+      return;
+    }
+
+    // ─── Token usage stats (polled by the companion status-bar extension) ──
+    if (req.method === 'GET' && reqPathname === '/api/token-stats') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(getTokenStatsSnapshot()));
+      return;
+    }
+
+    if (req.method === 'POST' && reqPathname === '/api/token-stats/reset') {
+      resetTokenStats();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
       return;
     }
 
@@ -1879,6 +2124,15 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
                 });
               }
             }
+
+            // Capture the official context windows (`maxTokens`) before the
+            // response leaves the proxy -- this is the authoritative source for
+            // the IDE's own Gemini models. Injected `Custom` entries carry a
+            // placeholder window and are skipped inside.
+            const capturedWindows = registerOfficialContextWindows(
+              (googleJson.models || {}) as Record<string, { maxTokens?: unknown; tagTitle?: unknown }>,
+            );
+            log.info(`[Proxy][Window] captured ${capturedWindows} official context window(s)`);
 
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify(googleJson));

@@ -17,6 +17,7 @@ scratch/
 
 # Compiled output (TypeScript build artifacts)
 dist/
+extension/out/
 
 # Playwright MCP temporary debug artifacts
 .playwright-mcp/
